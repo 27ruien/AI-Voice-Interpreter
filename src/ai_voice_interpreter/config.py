@@ -1,0 +1,172 @@
+from __future__ import annotations
+
+import os
+from collections.abc import Mapping
+from dataclasses import dataclass, fields
+from pathlib import Path
+
+from dotenv import dotenv_values
+
+from .exceptions import ConfigurationError
+
+DEFAULT_SYSTEM_VOICE = "longanyang"
+DEFAULT_HTTP_URLS = {
+    "beijing": "https://dashscope.aliyuncs.com/api/v1",
+    "singapore": "https://dashscope-intl.aliyuncs.com/api/v1",
+}
+DEFAULT_WEBSOCKET_URLS = {
+    "beijing": "wss://dashscope.aliyuncs.com/api-ws/v1/inference",
+    "singapore": "wss://dashscope-intl.aliyuncs.com/api-ws/v1/inference",
+}
+
+
+def _as_bool(value: str | bool | None, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigurationError(f"无法解析布尔配置值：{value}")
+
+
+@dataclass(frozen=True, slots=True)
+class AppConfig:
+    app_mode: str = "real"
+    dashscope_api_key: str = ""
+    dashscope_region: str = "beijing"
+    dashscope_workspace_id: str = ""
+    dashscope_http_base_url: str = ""
+    dashscope_websocket_base_url: str = ""
+    asr_provider: str = "dashscope"
+    asr_model: str = "paraformer-realtime-v2"
+    translation_provider: str = "dashscope"
+    translation_model: str = "qwen-mt-flash"
+    source_language: str = "zh"
+    target_language: str = "en"
+    tts_provider: str = "dashscope"
+    tts_model: str = "cosyvoice-v3-flash"
+    tts_voice: str = ""
+    cloned_voice_id: str = ""
+    audio_sample_rate: int = 16000
+    audio_channels: int = 1
+    keep_temp_audio: bool = False
+    log_level: str = "INFO"
+    network_timeout_seconds: float = 45.0
+
+    @classmethod
+    def load(
+        cls,
+        dotenv_path: Path | str = Path(".env"),
+        environ: Mapping[str, str] | None = None,
+        user_config_path: Path | None = None,
+    ) -> AppConfig:
+        user_path = Path(user_config_path) if user_config_path else default_user_config_path()
+        values: dict[str, str] = {}
+        if user_path.exists():
+            values.update(_clean_dotenv(dotenv_values(user_path)))
+        env_path = Path(dotenv_path)
+        if env_path.exists():
+            values.update(_clean_dotenv(dotenv_values(env_path)))
+        values.update(dict(os.environ if environ is None else environ))
+
+        def get(name: str, default: str) -> str:
+            return str(values.get(name, default)).strip()
+
+        try:
+            config = cls(
+                app_mode=get("APP_MODE", "real").lower(),
+                dashscope_api_key=get("DASHSCOPE_API_KEY", ""),
+                dashscope_region=get("DASHSCOPE_REGION", "beijing").lower(),
+                dashscope_workspace_id=get("DASHSCOPE_WORKSPACE_ID", ""),
+                dashscope_http_base_url=get("DASHSCOPE_HTTP_BASE_URL", ""),
+                dashscope_websocket_base_url=get("DASHSCOPE_WEBSOCKET_BASE_URL", ""),
+                asr_provider=get("ASR_PROVIDER", "dashscope").lower(),
+                asr_model=get("ASR_MODEL", "paraformer-realtime-v2"),
+                translation_provider=get("TRANSLATION_PROVIDER", "dashscope").lower(),
+                translation_model=get("TRANSLATION_MODEL", "qwen-mt-flash"),
+                source_language=get("SOURCE_LANGUAGE", "zh").lower(),
+                target_language=get("TARGET_LANGUAGE", "en").lower(),
+                tts_provider=get("TTS_PROVIDER", "dashscope").lower(),
+                tts_model=get("TTS_MODEL", "cosyvoice-v3-flash"),
+                tts_voice=get("TTS_VOICE", ""),
+                cloned_voice_id=get("CLONED_VOICE_ID", ""),
+                audio_sample_rate=int(get("AUDIO_SAMPLE_RATE", "16000")),
+                audio_channels=int(get("AUDIO_CHANNELS", "1")),
+                keep_temp_audio=_as_bool(values.get("KEEP_TEMP_AUDIO"), False),
+                log_level=get("LOG_LEVEL", "INFO").upper(),
+                network_timeout_seconds=float(get("NETWORK_TIMEOUT_SECONDS", "45")),
+            )
+        except ValueError as exc:
+            raise ConfigurationError(f"配置值格式错误：{exc}") from exc
+        config.validate_basic()
+        return config
+
+    def validate_basic(self) -> None:
+        if self.app_mode not in {"real", "mock"}:
+            raise ConfigurationError("APP_MODE 必须是 real 或 mock。")
+        if self.dashscope_region not in DEFAULT_HTTP_URLS:
+            raise ConfigurationError("DASHSCOPE_REGION 必须是 beijing 或 singapore。")
+        if self.audio_sample_rate <= 0 or self.audio_channels != 1:
+            raise ConfigurationError("当前 MVP 要求正采样率和 AUDIO_CHANNELS=1。")
+        if self.network_timeout_seconds <= 0:
+            raise ConfigurationError("NETWORK_TIMEOUT_SECONDS 必须大于 0。")
+        if self.cloned_voice_id and not self.cloned_voice_id.startswith(f"{self.tts_model}-"):
+            raise ConfigurationError(
+                "CLONED_VOICE_ID 与 TTS_MODEL 不匹配；复刻和合成必须使用同一模型。"
+            )
+
+    def validate_for_processing(self) -> None:
+        self.validate_basic()
+        if self.app_mode == "real" and not self.dashscope_api_key:
+            raise ConfigurationError(
+                "真实模式缺少 DASHSCOPE_API_KEY。请配置 .env，或执行 make mock 体验界面。"
+            )
+        if self.app_mode == "real":
+            providers = {self.asr_provider, self.translation_provider, self.tts_provider}
+            if providers != {"dashscope"}:
+                raise ConfigurationError("真实模式当前仅支持 dashscope Provider。")
+
+    @property
+    def effective_tts_voice(self) -> str:
+        return self.cloned_voice_id or self.tts_voice or DEFAULT_SYSTEM_VOICE
+
+    @property
+    def http_base_url(self) -> str:
+        if self.dashscope_http_base_url:
+            return self.dashscope_http_base_url.rstrip("/")
+        if self.dashscope_workspace_id:
+            domain = _workspace_domain(self.dashscope_region)
+            return f"https://{self.dashscope_workspace_id}.{domain}/api/v1"
+        return DEFAULT_HTTP_URLS[self.dashscope_region]
+
+    @property
+    def websocket_base_url(self) -> str:
+        if self.dashscope_websocket_base_url:
+            return self.dashscope_websocket_base_url.rstrip("/")
+        if self.dashscope_workspace_id:
+            domain = _workspace_domain(self.dashscope_region)
+            return f"wss://{self.dashscope_workspace_id}.{domain}/api-ws/v1/inference"
+        return DEFAULT_WEBSOCKET_URLS[self.dashscope_region]
+
+    def safe_summary(self) -> dict[str, object]:
+        summary = {field.name: getattr(self, field.name) for field in fields(self)}
+        summary["dashscope_api_key"] = "***configured***" if self.dashscope_api_key else ""
+        return summary
+
+
+def default_user_config_path() -> Path:
+    return Path.home() / ".config" / "ai-voice-interpreter" / "config.env"
+
+
+def _workspace_domain(region: str) -> str:
+    if region == "beijing":
+        return "cn-beijing.maas.aliyuncs.com"
+    return "ap-southeast-1.maas.aliyuncs.com"
+
+
+def _clean_dotenv(values: Mapping[str, str | None]) -> dict[str, str]:
+    return {key: value for key, value in values.items() if value is not None}
