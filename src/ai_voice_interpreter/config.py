@@ -9,7 +9,9 @@ from dotenv import dotenv_values
 
 from .exceptions import ConfigurationError
 
-DEFAULT_SYSTEM_VOICE = "longanyang"
+DEFAULT_TTS_MODEL = "cosyvoice-v3-flash"
+DEFAULT_SYSTEM_VOICES = {DEFAULT_TTS_MODEL: "longanyang"}
+DEFAULT_SYSTEM_VOICE = DEFAULT_SYSTEM_VOICES[DEFAULT_TTS_MODEL]
 DEFAULT_HTTP_URLS = {
     "beijing": "https://dashscope.aliyuncs.com/api/v1",
     "singapore": "https://dashscope-intl.aliyuncs.com/api/v1",
@@ -48,7 +50,7 @@ class AppConfig:
     source_language: str = "zh"
     target_language: str = "en"
     tts_provider: str = "dashscope"
-    tts_model: str = "cosyvoice-v3-flash"
+    tts_model: str = DEFAULT_TTS_MODEL
     tts_voice: str = ""
     cloned_voice_id: str = ""
     audio_sample_rate: int = 16000
@@ -118,6 +120,14 @@ class AppConfig:
             raise ConfigurationError(
                 "CLONED_VOICE_ID 与 TTS_MODEL 不匹配；复刻和合成必须使用同一模型。"
             )
+        if (
+            not self.cloned_voice_id
+            and not self.tts_voice
+            and self.tts_model not in DEFAULT_SYSTEM_VOICES
+        ):
+            raise ConfigurationError(
+                "当前 TTS_MODEL 没有内置默认音色，请显式配置兼容的 TTS_VOICE。"
+            )
 
     def validate_for_processing(self) -> None:
         self.validate_basic()
@@ -132,7 +142,16 @@ class AppConfig:
 
     @property
     def effective_tts_voice(self) -> str:
-        return self.cloned_voice_id or self.tts_voice or DEFAULT_SYSTEM_VOICE
+        if self.cloned_voice_id:
+            return self.cloned_voice_id
+        if self.tts_voice:
+            return self.tts_voice
+        try:
+            return DEFAULT_SYSTEM_VOICES[self.tts_model]
+        except KeyError as exc:
+            raise ConfigurationError(
+                "当前 TTS_MODEL 没有内置默认音色，请显式配置兼容的 TTS_VOICE。"
+            ) from exc
 
     @property
     def http_base_url(self) -> str:

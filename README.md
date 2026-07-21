@@ -50,10 +50,12 @@ git clone https://github.com/27ruien/AI-Voice-Interpreter.git
 cd AI-Voice-Interpreter
 cp .env.example .env
 make setup
+# 编辑 .env，填写 DASHSCOPE_API_KEY 后再继续
+make doctor
 make run
 ```
 
-`make setup` 创建 `.venv` 并安装运行和测试依赖。之后通常只需 `make run`。
+`make setup` 创建 `.venv` 并安装运行和测试依赖。`make doctor` 先检查本机真实模式条件，之后通常只需 `make run`。
 
 ### Mock 模式
 
@@ -66,6 +68,22 @@ make mock
 
 仍需实际点击录音和停止，以验证麦克风、WAV 写入、Qt 工作线程、状态流和自动播放。Mock ASR/翻译会显示固定示例，Mock TTS 播放短测试音；界面会明确标注 Mock Mode，不会将其冒充真实 AI 结果。
 
+## 真实模式诊断
+
+填写 `.env` 后，建议先运行：
+
+```bash
+make doctor
+```
+
+等价命令是：
+
+```bash
+.venv/bin/python -m ai_voice_interpreter.doctor
+```
+
+Doctor **不会调用任何 ASR、翻译或 TTS 收费模型，也不会发起模型网络请求**。它使用 `PASS`、`WARN`、`FAIL` 检查 Python 版本、macOS、配置加载、API Key 是否存在（只显示已配置/未配置）、模型和音色、麦克风输入设备、`/usr/bin/afplay`、临时目录写权限及必要 Python 包。最后会明确说明是否满足真实模式启动条件。
+
 ## 配置真实模式
 
 编辑 `.env`：
@@ -76,10 +94,15 @@ APP_MODE=real
 DASHSCOPE_API_KEY=
 DASHSCOPE_REGION=beijing
 
+ASR_PROVIDER=dashscope
 ASR_MODEL=paraformer-realtime-v2
+TRANSLATION_PROVIDER=dashscope
 TRANSLATION_MODEL=qwen-mt-flash
+TTS_PROVIDER=dashscope
 TTS_MODEL=cosyvoice-v3-flash
-TTS_VOICE=longanyang
+# 留空时默认选择 longanyang（兼容 cosyvoice-v3-flash 与英文）
+TTS_VOICE=
+CLONED_VOICE_ID=
 ```
 
 API Key 从[阿里云百炼控制台](https://bailian.console.aliyun.com/)创建。不同地域的 Key 不通用；默认配置使用北京地域。
@@ -154,6 +177,7 @@ CLONED_VOICE_ID=cosyvoice-v3-flash-myvoice-xxxxxxxx
 ```bash
 make test
 make lint
+make doctor
 ```
 
 等价命令：
@@ -172,6 +196,8 @@ make lint
 - 播放时长不计入总处理延迟。
 
 这些数值包含本机调度和网络传输时间，适合体验对比，不等同于服务端独立推理耗时。
+
+真实模式 INFO 日志会记录每个阶段的开始/结束、模型、`request_id`、文本长度、空文本状态、生成音频路径和字节数、`afplay` 启动与退出结果，以及 ASR/翻译/TTS/总延迟。INFO 不记录 API Key，也不记录完整识别或翻译文本；克隆音色只记录为 `cloned` 模式，不记录完整音色 ID。
 
 ## 临时音频与隐私
 

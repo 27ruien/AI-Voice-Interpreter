@@ -45,6 +45,13 @@ class InterpreterPipeline:
             result.recognized_text = asr.text
             result.asr_latency_ms = max(0.0, asr.duration_ms)
             self._record_metadata(result, "asr", asr.provider, asr.model, asr.request_id)
+            logger.info(
+                "ASR finished latency_ms=%.1f request_id=%s text_length=%d empty=%s",
+                result.asr_latency_ms,
+                asr.request_id or "-",
+                len(asr.text),
+                not bool(asr.text.strip()),
+            )
 
             notify(ProcessingStatus.TRANSLATING)
             logger.info("Translation started")
@@ -63,6 +70,12 @@ class InterpreterPipeline:
                 translation.model,
                 translation.request_id,
             )
+            logger.info(
+                "Translation finished latency_ms=%.1f request_id=%s text_length=%d",
+                result.translation_latency_ms,
+                translation.request_id or "-",
+                len(translation.translated_text),
+            )
 
             notify(ProcessingStatus.SYNTHESIZING)
             logger.info("TTS started")
@@ -70,6 +83,14 @@ class InterpreterPipeline:
             result.generated_audio_path = tts.audio_path
             result.tts_latency_ms = max(0.0, tts.duration_ms)
             self._record_metadata(result, "tts", tts.provider, tts.model, tts.request_id)
+            audio_size = tts.audio_path.stat().st_size if tts.audio_path.is_file() else 0
+            logger.info(
+                "TTS finished latency_ms=%.1f request_id=%s audio_path=%s audio_bytes=%d",
+                result.tts_latency_ms,
+                tts.request_id or "-",
+                tts.audio_path,
+                audio_size,
+            )
         except InterpreterError as exc:
             result.error = str(exc)
             logger.exception("Pipeline failed type=%s", type(exc).__name__)

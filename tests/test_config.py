@@ -76,3 +76,8 @@ def test_workspace_builds_beijing_dedicated_endpoints(tmp_path: Path) -> None:
     assert config.http_base_url == "https://ws123.cn-beijing.maas.aliyuncs.com/api/v1"
     assert config.websocket_base_url.startswith("wss://ws123.cn-beijing.maas.aliyuncs.com/")
 
+
+def test_nondefault_tts_model_requires_explicit_compatible_voice() -> None:
+    config = AppConfig(app_mode="mock", tts_model="cosyvoice-v2")
+    with pytest.raises(ConfigurationError, match="TTS_VOICE"):
+        config.validate_basic()

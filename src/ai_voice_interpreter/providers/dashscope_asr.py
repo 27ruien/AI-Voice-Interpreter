@@ -21,6 +21,12 @@ class DashScopeSpeechRecognizer:
         if not audio_path.is_file():
             raise ASRProviderError(f"录音文件不存在：{audio_path}")
         started = time.perf_counter()
+        logger.info(
+            "ASR provider started model=%s audio_file=%s audio_bytes=%d",
+            self.config.asr_model,
+            audio_path.name,
+            audio_path.stat().st_size,
+        )
         try:
             configure_dashscope(self.config)
             from dashscope.audio.asr import Recognition
@@ -52,6 +58,7 @@ class DashScopeSpeechRecognizer:
                 raise ASRProviderError("未识别到有效中文语音，请靠近麦克风后重试。")
             duration_ms = (time.perf_counter() - started) * 1000
             logger.info("ASR completed elapsed_ms=%.1f request_id=%s", duration_ms, request_id)
+            logger.info("ASR output text_length=%d empty=%s", len(text), not bool(text))
             logger.debug("ASR text=%r", text)
             return ASRResult(
                 text=text,

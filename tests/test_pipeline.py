@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 from ai_voice_interpreter.exceptions import (
@@ -103,3 +104,27 @@ def test_tts_failure_is_explicit(tmp_path: Path) -> None:
     assert result.translated_text
     assert result.generated_audio_path is None
 
+
+def test_pipeline_info_logs_have_ids_lengths_paths_and_latencies(
+    tmp_path: Path,
+    caplog: object,
+) -> None:
+    caplog.set_level(logging.INFO)  # type: ignore[attr-defined]
+    pipeline = InterpreterPipeline(
+        MockSpeechRecognizer(),
+        MockTranslator(),
+        MockTextToSpeech(tmp_path / "tts-observability"),
+    )
+    result = pipeline.process(audio_file(tmp_path))
+    assert result.succeeded
+    messages = "\n".join(record.getMessage() for record in caplog.records)  # type: ignore[attr-defined]
+    assert "ASR finished latency_ms=" in messages
+    assert "request_id=mock-asr-request" in messages
+    assert "text_length=" in messages
+    assert "Translation finished latency_ms=" in messages
+    assert "request_id=mock-translation-request" in messages
+    assert "TTS finished latency_ms=" in messages
+    assert "request_id=mock-tts-request" in messages
+    assert "audio_path=" in messages
+    assert "audio_bytes=" in messages
+    assert "Pipeline finished total_ms=" in messages

@@ -38,11 +38,12 @@ class MacAudioPlayer:
             )
             with self._lock:
                 self._process = process
+            logger.info("afplay started pid=%s executable=%s", process.pid, self.executable)
             _, stderr = process.communicate()
             if process.returncode not in {0, -15}:
                 detail = stderr.decode("utf-8", errors="replace").strip()
                 raise PlaybackError(f"播放失败：{detail or f'afplay 退出码 {process.returncode}'}")
-            logger.info("Playback finished")
+            logger.info("afplay finished returncode=%s", process.returncode)
         except PlaybackError:
             raise
         except Exception as exc:

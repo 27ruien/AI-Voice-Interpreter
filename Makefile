@@ -1,4 +1,4 @@
-.PHONY: setup run test lint mock
+.PHONY: setup run test lint mock doctor
 
 PYTHON ?= python3
 VENV := .venv
@@ -21,3 +21,5 @@ test:
 lint:
 	$(VENV_PYTHON) -m ruff check .
 
+doctor:
+	$(VENV_PYTHON) -m ai_voice_interpreter.doctor

@@ -30,6 +30,13 @@ class DashScopeTranslator:
         if not text.strip():
             raise TranslationProviderError("识别文本为空，无法翻译。")
         started = time.perf_counter()
+        logger.info(
+            "Translation provider started model=%s source=%s target=%s text_length=%d",
+            self.config.translation_model,
+            source_language,
+            target_language,
+            len(text),
+        )
         try:
             dashscope = configure_dashscope(self.config)
             response = dashscope.Generation.call(
@@ -63,6 +70,7 @@ class DashScopeTranslator:
                 duration_ms,
                 request_id,
             )
+            logger.info("Translation output text_length=%d", len(translated))
             logger.debug("Translation text=%r", translated)
             return TranslationResult(
                 source_text=text,

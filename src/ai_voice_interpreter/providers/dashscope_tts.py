@@ -27,6 +27,13 @@ class DashScopeTextToSpeech:
         selected_voice = voice or self.config.effective_tts_voice
         self._validate_voice(selected_voice)
         started = time.perf_counter()
+        voice_mode = "cloned" if self.config.cloned_voice_id else "system"
+        logger.info(
+            "TTS provider started model=%s voice_mode=%s text_length=%d",
+            self.config.tts_model,
+            voice_mode,
+            len(text),
+        )
         try:
             configure_dashscope(self.config)
             from dashscope.audio.tts_v2 import AudioFormat, SpeechSynthesizer
@@ -49,10 +56,15 @@ class DashScopeTextToSpeech:
             output_path.write_bytes(audio)
             duration_ms = (time.perf_counter() - started) * 1000
             logger.info(
-                "TTS completed elapsed_ms=%.1f request_id=%s voice=%s",
+                "TTS completed elapsed_ms=%.1f request_id=%s voice_mode=%s",
                 duration_ms,
                 request_id,
-                selected_voice,
+                voice_mode,
+            )
+            logger.info(
+                "TTS audio written path=%s bytes=%d",
+                output_path,
+                output_path.stat().st_size,
             )
             return TTSResult(
                 audio_path=output_path,
