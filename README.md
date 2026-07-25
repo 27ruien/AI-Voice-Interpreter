@@ -241,7 +241,7 @@ WSS location 使用 HTTP/1.1 Upgrade、`$connection_upgrade`、3600 秒读写超
 
 ## 服务器部署与回滚
 
-服务器配置模板为 `server/.env.example`。实际 `server/.env` 必须 `chmod 600`，配置 Workspace Key/ID、Native/Compatible Endpoint、MVP Token、模型与 Streaming 参数；Key 和 Token 不得进入 Git。
+服务器配置模板为 `server/.env.example`。实际 `server/.env` 必须 `chmod 600`，配置 Workspace Key/ID、Native/Compatible Endpoint、MVP Token、模型与 Streaming 参数；Key 和 Token 不得进入 Git。HTTP 按句识别使用 `ASR_MODEL=paraformer-v2`，实时识别独立使用 `STREAM_ASR_MODEL=paraformer-realtime-v2`，不得用实时模型覆盖 HTTP Fallback 的文件识别模型。
 
 ```bash
 cd /srv/ai-voice-interpreter

@@ -29,7 +29,8 @@ class ServerConfig:
     dashscope_workspace_id: str = ""
     dashscope_native_base_url: str = ""
     dashscope_compatible_base_url: str = ""
-    asr_model: str = "paraformer-realtime-v2"
+    asr_model: str = "paraformer-v2"
+    stream_asr_model: str = "paraformer-realtime-v2"
     translation_model: str = "qwen-mt-flash"
     tts_model: str = "cosyvoice-v3-flash"
     tts_voice: str = "longanyang"
@@ -91,7 +92,8 @@ class ServerConfig:
             dashscope_compatible_base_url=get(
                 "DASHSCOPE_COMPATIBLE_BASE_URL", ""
             ).rstrip("/"),
-            asr_model=get("ASR_MODEL", "paraformer-realtime-v2"),
+            asr_model=get("ASR_MODEL", "paraformer-v2"),
+            stream_asr_model=get("STREAM_ASR_MODEL", "paraformer-realtime-v2"),
             translation_model=get("TRANSLATION_MODEL", "qwen-mt-flash"),
             tts_model=get("TTS_MODEL", "cosyvoice-v3-flash"),
             tts_voice=get("TTS_VOICE", "longanyang"),
@@ -198,14 +200,14 @@ class ServerConfig:
         ):
             raise ValueError("TTS 文本分段字符阈值顺序无效。")
 
-    def provider_config(self) -> AppConfig:
+    def provider_config(self, *, asr_model: str | None = None) -> AppConfig:
         return AppConfig(
             app_mode="real",
             interpreter_mode="local",
             dashscope_api_key=self.dashscope_api_key,
             dashscope_workspace_id=self.dashscope_workspace_id,
             dashscope_http_base_url=self.dashscope_native_base_url,
-            asr_model=self.asr_model,
+            asr_model=asr_model or self.asr_model,
             translation_model=self.translation_model,
             tts_model=self.tts_model,
             tts_voice=self.tts_voice,

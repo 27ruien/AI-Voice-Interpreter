@@ -5,6 +5,7 @@ import pytest
 
 from ai_voice_interpreter.config import AppConfig
 from ai_voice_interpreter.exceptions import ConfigurationError
+from ai_voice_interpreter.providers.common import friendly_service_message
 from ai_voice_interpreter.providers.dashscope_tts import DashScopeTextToSpeech
 from ai_voice_interpreter.providers.mock_providers import (
     MockSpeechRecognizer,
@@ -53,3 +54,15 @@ def test_real_tts_refuses_non_clone_voice_when_clone_is_configured(tmp_path: Pat
     with pytest.raises(ConfigurationError, match="未使用"):
         provider._validate_voice("longanyang")
 
+
+def test_provider_error_message_handles_broken_sdk_string_conversion() -> None:
+    class BrokenResult:
+        message = "AccessDenied.Unpurchased: not eligible for model"
+        status_code = 403
+
+        def __str__(self) -> str:
+            raise AttributeError("headers")
+
+    rendered = friendly_service_message(BrokenResult())
+    assert "模型访问被拒绝" in rendered
+    assert "headers" not in rendered

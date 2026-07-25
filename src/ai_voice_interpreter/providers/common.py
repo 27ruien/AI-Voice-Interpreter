@@ -28,9 +28,16 @@ def request_id_from(value: Any) -> str | None:
 
 
 def friendly_service_message(message: object, status_code: object = None) -> str:
-    raw = str(message or "未知服务错误")
+    raw = _safe_provider_text(message)
     lowered = raw.lower()
-    status = str(status_code or "")
+    status = _safe_provider_text(
+        status_code or _safe_provider_attribute(message, "status_code"), fallback=""
+    )
+    if any(
+        token in lowered
+        for token in ("accessdenied", "access denied", "unpurchased", "eligible")
+    ):
+        return "DashScope 模型访问被拒绝，请在当前地域和 Workspace 开通对应模型服务。"
     authentication_tokens = ("unauthorized", "api key", "authentication")
     if status in {"401", "403"} or any(token in lowered for token in authentication_tokens):
         return "DashScope 鉴权失败，请检查 API Key、地域和 Workspace 配置。"
@@ -43,3 +50,22 @@ def friendly_service_message(message: object, status_code: object = None) -> str
     if any(token in lowered for token in ("connection", "network", "dns")):
         return "无法连接 DashScope，请检查网络和服务地址。"
     return f"DashScope 请求失败：{raw}"
+
+
+def _safe_provider_text(value: object, *, fallback: str = "未知服务错误") -> str:
+    if value is None:
+        return fallback
+    candidate = _safe_provider_attribute(value, "message")
+    if candidate is not None and candidate is not value:
+        return _safe_provider_text(candidate, fallback=fallback)
+    try:
+        return str(value)
+    except Exception:
+        return fallback
+
+
+def _safe_provider_attribute(value: object, name: str) -> object | None:
+    try:
+        return getattr(value, name, None)
+    except Exception:
+        return None

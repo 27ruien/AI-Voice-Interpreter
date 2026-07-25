@@ -7,7 +7,11 @@ from http import HTTPStatus
 from typing import Any
 
 from ai_voice_interpreter.config import AppConfig
-from ai_voice_interpreter.providers.common import configure_dashscope, friendly_service_message
+from ai_voice_interpreter.providers.common import (
+    configure_dashscope,
+    friendly_service_message,
+    request_id_from,
+)
 
 from .streaming_interfaces import ASRStreamEvent
 
@@ -41,6 +45,8 @@ class DashScopeRealtimeASRSession:
                 owner._callback_offer(ASRStreamEvent(completed=True, request_id=owner.request_id))
 
             def on_error(self, result: Any) -> None:
+                owner.request_id = request_id_from(result) or owner.request_id
+                owner._finished = True
                 owner._callback_offer(RuntimeError(friendly_service_message(result)))
 
         kwargs: dict[str, Any] = {}

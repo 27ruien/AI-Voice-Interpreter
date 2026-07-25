@@ -47,7 +47,7 @@ class StreamDependencies:
 
     @classmethod
     def real(cls, config: ServerConfig) -> StreamDependencies:
-        provider_config = config.provider_config()
+        provider_config = config.provider_config(asr_model=config.stream_asr_model)
         return cls(
             asr_factory=lambda: DashScopeRealtimeASRSession(
                 provider_config, config.stream_audio_queue_max_chunks

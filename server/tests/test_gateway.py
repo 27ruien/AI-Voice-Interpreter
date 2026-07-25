@@ -40,6 +40,15 @@ def settings(tmp_path: Path, **overrides: object) -> ServerConfig:
     return ServerConfig(**values)
 
 
+def test_http_and_streaming_asr_models_are_separate(tmp_path: Path) -> None:
+    config = settings(tmp_path)
+    assert config.provider_config().asr_model == "paraformer-v2"
+    assert (
+        config.provider_config(asr_model=config.stream_asr_model).asr_model
+        == "paraformer-realtime-v2"
+    )
+
+
 class FakePipeline:
     def __init__(self, output_dir: Path, *, error: str | None = None) -> None:
         self.output_dir = output_dir
