@@ -1,4 +1,4 @@
-.PHONY: setup run test lint mock doctor
+.PHONY: setup run test lint mock doctor server-test server-lint remote-smoke
 
 PYTHON ?= python3
 VENV := .venv
@@ -23,3 +23,14 @@ lint:
 
 doctor:
 	$(VENV_PYTHON) -m ai_voice_interpreter.doctor
+
+server-test:
+	$(VENV_PYTHON) -m pytest server/tests
+
+server-lint:
+	$(VENV_PYTHON) -m ruff check server
+
+REMOTE_SMOKE_AUDIO ?= /tmp/ai-interpreter-test.wav
+remote-smoke:
+	$(VENV_PYTHON) -m ai_voice_interpreter.remote_smoke \
+		--audio "$(REMOTE_SMOKE_AUDIO)" --verify-output

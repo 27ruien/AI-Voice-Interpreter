@@ -36,3 +36,8 @@ class PlaybackError(InterpreterError):
 class VoiceEnrollmentError(InterpreterError):
     pass
 
+
+class GatewayError(InterpreterError):
+    def __init__(self, message: str, request_id: str | None = None) -> None:
+        super().__init__(message)
+        self.request_id = request_id

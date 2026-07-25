@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtCore import QObject, Signal, Slot
 
 from ..audio.player import MacAudioPlayer
 from ..config import AppConfig
 from ..models import PipelineResult, ProcessingStatus
-from ..pipeline import InterpreterPipeline
 
 
 class ProcessingWorker(QObject):
@@ -20,7 +20,7 @@ class ProcessingWorker(QObject):
     def __init__(
         self,
         config: AppConfig,
-        pipeline: InterpreterPipeline,
+        pipeline: Any,
         player: MacAudioPlayer,
         audio_path: Path,
     ) -> None:

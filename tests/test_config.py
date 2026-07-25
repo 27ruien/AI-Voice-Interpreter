@@ -25,9 +25,20 @@ def test_config_loads_dotenv_and_environment_takes_precedence(tmp_path: Path) ->
     assert config.audio_sample_rate == 16000
 
 
-def test_missing_api_key_allows_load_but_blocks_real_processing(tmp_path: Path) -> None:
+def test_remote_mode_needs_gateway_token_not_dashscope_key(tmp_path: Path) -> None:
     config = load_isolated(tmp_path, {})
     assert config.dashscope_api_key == ""
+    with pytest.raises(ConfigurationError, match="AI_GATEWAY_TOKEN"):
+        config.validate_for_processing()
+
+
+def test_remote_mode_accepts_gateway_without_local_api_key(tmp_path: Path) -> None:
+    config = load_isolated(tmp_path, {"AI_GATEWAY_TOKEN": "unit-test-token"})
+    config.validate_for_processing()
+
+
+def test_local_mode_still_requires_dashscope_key(tmp_path: Path) -> None:
+    config = load_isolated(tmp_path, {"INTERPRETER_MODE": "local"})
     with pytest.raises(ConfigurationError, match="DASHSCOPE_API_KEY"):
         config.validate_for_processing()
 
@@ -35,6 +46,13 @@ def test_missing_api_key_allows_load_but_blocks_real_processing(tmp_path: Path) 
 def test_mock_mode_needs_no_api_key(tmp_path: Path) -> None:
     config = load_isolated(tmp_path, {"APP_MODE": "mock"})
     config.validate_for_processing()
+
+
+def test_safe_summary_hides_both_secrets() -> None:
+    config = AppConfig(dashscope_api_key="dash-secret", ai_gateway_token="gateway-secret")
+    summary = config.safe_summary()
+    assert "dash-secret" not in str(summary)
+    assert "gateway-secret" not in str(summary)
 
 
 def test_cloned_voice_takes_precedence_over_system_voice(tmp_path: Path) -> None:

@@ -38,11 +38,15 @@ class DashScopeTextToSpeech:
             configure_dashscope(self.config)
             from dashscope.audio.tts_v2 import AudioFormat, SpeechSynthesizer
 
+            synthesizer_kwargs = {}
+            if self.config.dashscope_workspace_id:
+                synthesizer_kwargs["workspace"] = self.config.dashscope_workspace_id
             synthesizer = SpeechSynthesizer(
                 model=self.config.tts_model,
                 voice=selected_voice,
                 format=AudioFormat.WAV_24000HZ_MONO_16BIT,
                 language_hints=[self.config.target_language],
+                **synthesizer_kwargs,
             )
             audio = synthesizer.call(
                 text.strip(),

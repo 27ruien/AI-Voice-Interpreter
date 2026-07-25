@@ -11,7 +11,15 @@ from pathlib import Path
 
 from .config import AppConfig
 
-REQUIRED_PACKAGES = ("dashscope", "numpy", "PySide6", "dotenv", "sounddevice", "soundfile")
+REQUIRED_PACKAGES = (
+    "dashscope",
+    "httpx",
+    "numpy",
+    "PySide6",
+    "dotenv",
+    "sounddevice",
+    "soundfile",
+)
 
 
 class CheckLevel(StrEnum):
@@ -95,7 +103,7 @@ def collect_checks(
     except Exception as exc:
         checks.append(DoctorCheck(CheckLevel.FAIL, "Configuration", str(exc)))
 
-    api_key_configured = False
+    processing_configured = False
     real_mode = False
     if config is not None:
         real_mode = config.app_mode == "real"
@@ -106,15 +114,43 @@ def collect_checks(
                 "real" if real_mode else f"当前为 {config.app_mode}，真实验收前应设为 real",
             )
         )
-        api_key_configured = bool(config.dashscope_api_key)
-        checks.append(
-            DoctorCheck(
-                CheckLevel.PASS if api_key_configured else CheckLevel.WARN,
-                "DASHSCOPE_API_KEY",
-                "已配置（值已隐藏）" if api_key_configured else "未配置",
+        if config.interpreter_mode == "remote":
+            gateway_url = bool(config.ai_gateway_base_url)
+            gateway_token = bool(config.ai_gateway_token)
+            processing_configured = gateway_url and gateway_token
+            checks.append(DoctorCheck(CheckLevel.PASS, "INTERPRETER_MODE", "remote"))
+            checks.append(
+                DoctorCheck(
+                    CheckLevel.PASS if gateway_url else CheckLevel.FAIL,
+                    "AI_GATEWAY_BASE_URL",
+                    "已配置" if gateway_url else "未配置",
+                )
             )
-        )
-        checks.extend(_model_checks(config))
+            checks.append(
+                DoctorCheck(
+                    CheckLevel.PASS if gateway_token else CheckLevel.WARN,
+                    "AI_GATEWAY_TOKEN",
+                    "已配置（值已隐藏）" if gateway_token else "未配置",
+                )
+            )
+            checks.append(
+                DoctorCheck(
+                    CheckLevel.WARN if config.dashscope_api_key else CheckLevel.PASS,
+                    "Local DASHSCOPE_API_KEY",
+                    "不应在 Remote Mode 配置" if config.dashscope_api_key else "未配置（正确）",
+                )
+            )
+        else:
+            processing_configured = bool(config.dashscope_api_key)
+            checks.append(DoctorCheck(CheckLevel.WARN, "INTERPRETER_MODE", "local 开发回退"))
+            checks.append(
+                DoctorCheck(
+                    CheckLevel.PASS if processing_configured else CheckLevel.WARN,
+                    "DASHSCOPE_API_KEY",
+                    "已配置（值已隐藏）" if processing_configured else "未配置",
+                )
+            )
+            checks.extend(_model_checks(config))
 
     microphone_ok, microphone_message = probe_microphone()
     checks.append(
@@ -144,7 +180,7 @@ def collect_checks(
     )
 
     has_failure = any(check.level == CheckLevel.FAIL for check in checks)
-    ready = not has_failure and config is not None and real_mode and api_key_configured
+    ready = not has_failure and config is not None and real_mode and processing_configured
     return DoctorReport(tuple(checks), ready)
 
 

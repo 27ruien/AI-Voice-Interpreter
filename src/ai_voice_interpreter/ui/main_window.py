@@ -24,7 +24,6 @@ from ..audio.recorder import MicrophoneRecorder
 from ..config import AppConfig
 from ..exceptions import InterpreterError
 from ..models import PipelineResult, ProcessingStatus
-from ..pipeline import InterpreterPipeline
 from .workers import PlaybackWorker, ProcessingWorker
 
 logger = logging.getLogger(__name__)
@@ -36,7 +35,7 @@ class MainWindow(QMainWindow):
         config: AppConfig,
         recorder: MicrophoneRecorder,
         player: MacAudioPlayer,
-        pipeline: InterpreterPipeline,
+        pipeline: Any,
     ) -> None:
         super().__init__()
         self.config = config
@@ -70,6 +69,15 @@ class MainWindow(QMainWindow):
             banner.setWordWrap(True)
             banner.setStyleSheet(
                 "background: #fff7ed; color: #9a3412; padding: 10px; border-radius: 6px;"
+            )
+            layout.addWidget(banner)
+        elif self.config.interpreter_mode == "remote":
+            banner = QLabel(
+                "Remote Mode：录音将通过 HTTPS Gateway 处理；Mac 不保存 DashScope API Key。"
+            )
+            banner.setWordWrap(True)
+            banner.setStyleSheet(
+                "background: #ecfdf5; color: #065f46; padding: 10px; border-radius: 6px;"
             )
             layout.addWidget(banner)
 
@@ -140,11 +148,20 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
 
     def _show_startup_notice(self) -> None:
-        if self.config.app_mode == "real" and not self.config.dashscope_api_key:
+        if (
+            self.config.app_mode == "real"
+            and self.config.interpreter_mode == "remote"
+            and not self.config.ai_gateway_token
+        ):
             self.error_text.setPlainText(
-                "真实模式尚未配置 DASHSCOPE_API_KEY。GUI 可以使用，但停止录音后不会调用服务。"
-                "请编辑 .env，或退出后执行 make mock。"
+                "Remote Mode 尚未配置 AI_GATEWAY_TOKEN。GUI 可以启动，但停止录音后不会调用服务。"
             )
+        elif (
+            self.config.app_mode == "real"
+            and self.config.interpreter_mode == "local"
+            and not self.config.dashscope_api_key
+        ):
+            self.error_text.setPlainText("Local Direct 模式尚未配置 DASHSCOPE_API_KEY。")
 
     def _start_recording(self) -> None:
         if self._thread is not None:
@@ -250,7 +267,9 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
         self.recorder.cleanup()
-        cleanup = getattr(self.pipeline.text_to_speech, "cleanup", None)
+        cleanup = getattr(self.pipeline, "cleanup", None)
+        if not callable(cleanup):
+            cleanup = getattr(getattr(self.pipeline, "text_to_speech", None), "cleanup", None)
         if callable(cleanup):
             cleanup()
         event.accept()

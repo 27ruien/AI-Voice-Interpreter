@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 from dotenv import dotenv_values
@@ -38,7 +38,10 @@ def _as_bool(value: str | bool | None, default: bool = False) -> bool:
 @dataclass(frozen=True, slots=True)
 class AppConfig:
     app_mode: str = "real"
-    dashscope_api_key: str = ""
+    interpreter_mode: str = "remote"
+    ai_gateway_base_url: str = "https://gridworks.cn/tool/ai-interpreter-api"
+    ai_gateway_token: str = field(default="", repr=False)
+    dashscope_api_key: str = field(default="", repr=False)
     dashscope_region: str = "beijing"
     dashscope_workspace_id: str = ""
     dashscope_http_base_url: str = ""
@@ -81,6 +84,12 @@ class AppConfig:
         try:
             config = cls(
                 app_mode=get("APP_MODE", "real").lower(),
+                interpreter_mode=get("INTERPRETER_MODE", "remote").lower(),
+                ai_gateway_base_url=get(
+                    "AI_GATEWAY_BASE_URL",
+                    "https://gridworks.cn/tool/ai-interpreter-api",
+                ).rstrip("/"),
+                ai_gateway_token=get("AI_GATEWAY_TOKEN", ""),
                 dashscope_api_key=get("DASHSCOPE_API_KEY", ""),
                 dashscope_region=get("DASHSCOPE_REGION", "beijing").lower(),
                 dashscope_workspace_id=get("DASHSCOPE_WORKSPACE_ID", ""),
@@ -110,6 +119,8 @@ class AppConfig:
     def validate_basic(self) -> None:
         if self.app_mode not in {"real", "mock"}:
             raise ConfigurationError("APP_MODE 必须是 real 或 mock。")
+        if self.interpreter_mode not in {"remote", "local"}:
+            raise ConfigurationError("INTERPRETER_MODE 必须是 remote 或 local。")
         if self.dashscope_region not in DEFAULT_HTTP_URLS:
             raise ConfigurationError("DASHSCOPE_REGION 必须是 beijing 或 singapore。")
         if self.audio_sample_rate <= 0 or self.audio_channels != 1:
@@ -131,14 +142,17 @@ class AppConfig:
 
     def validate_for_processing(self) -> None:
         self.validate_basic()
-        if self.app_mode == "real" and not self.dashscope_api_key:
-            raise ConfigurationError(
-                "真实模式缺少 DASHSCOPE_API_KEY。请配置 .env，或执行 make mock 体验界面。"
-            )
-        if self.app_mode == "real":
+        if self.app_mode == "real" and self.interpreter_mode == "remote":
+            if not self.ai_gateway_base_url.startswith(("http://", "https://")):
+                raise ConfigurationError("远程模式的 AI_GATEWAY_BASE_URL 必须是 HTTP(S) 地址。")
+            if not self.ai_gateway_token:
+                raise ConfigurationError("远程模式缺少 AI_GATEWAY_TOKEN。")
+        if self.app_mode == "real" and self.interpreter_mode == "local":
+            if not self.dashscope_api_key:
+                raise ConfigurationError("本地直连模式缺少 DASHSCOPE_API_KEY。")
             providers = {self.asr_provider, self.translation_provider, self.tts_provider}
             if providers != {"dashscope"}:
-                raise ConfigurationError("真实模式当前仅支持 dashscope Provider。")
+                raise ConfigurationError("本地直连模式当前仅支持 dashscope Provider。")
 
     @property
     def effective_tts_voice(self) -> str:
@@ -174,6 +188,7 @@ class AppConfig:
     def safe_summary(self) -> dict[str, object]:
         summary = {field.name: getattr(self, field.name) for field in fields(self)}
         summary["dashscope_api_key"] = "***configured***" if self.dashscope_api_key else ""
+        summary["ai_gateway_token"] = "***configured***" if self.ai_gateway_token else ""
         return summary
 
 

@@ -20,11 +20,10 @@ if [[ ! -x "${venv_python}" ]]; then
   exit 1
 fi
 
-if ! "${venv_python}" -c 'import PySide6, sounddevice, soundfile, dashscope' >/dev/null 2>&1; then
+if ! "${venv_python}" -c 'import PySide6, dashscope, httpx, sounddevice, soundfile' >/dev/null 2>&1; then
   echo "错误：虚拟环境依赖不完整。请重新运行 make setup。" >&2
   exit 1
 fi
 
 cd "${project_dir}"
 exec "${venv_python}" -m ai_voice_interpreter.main
-

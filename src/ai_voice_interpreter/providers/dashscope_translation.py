@@ -39,6 +39,9 @@ class DashScopeTranslator:
         )
         try:
             dashscope = configure_dashscope(self.config)
+            call_kwargs = {}
+            if self.config.dashscope_workspace_id:
+                call_kwargs["workspace"] = self.config.dashscope_workspace_id
             response = dashscope.Generation.call(
                 api_key=self.config.dashscope_api_key,
                 model=self.config.translation_model,
@@ -49,6 +52,7 @@ class DashScopeTranslator:
                 },
                 result_format="message",
                 timeout=self.config.network_timeout_seconds,
+                **call_kwargs,
             )
             request_id = request_id_from(response)
             if response.status_code != HTTPStatus.OK:

@@ -15,12 +15,24 @@ from .providers.dashscope_asr import DashScopeSpeechRecognizer
 from .providers.dashscope_translation import DashScopeTranslator
 from .providers.dashscope_tts import DashScopeTextToSpeech
 from .providers.mock_providers import MockSpeechRecognizer, MockTextToSpeech, MockTranslator
+from .remote import GatewayClient, RemoteInterpreterPipeline
 from .ui.main_window import MainWindow
 
 logger = logging.getLogger(__name__)
 
 
-def build_pipeline(config: AppConfig) -> InterpreterPipeline:
+def build_pipeline(config: AppConfig) -> InterpreterPipeline | RemoteInterpreterPipeline:
+    if config.app_mode == "real" and config.interpreter_mode == "remote":
+        return RemoteInterpreterPipeline(
+            GatewayClient(
+                config.ai_gateway_base_url,
+                config.ai_gateway_token,
+                config.network_timeout_seconds,
+            ),
+            source_language=config.source_language,
+            target_language=config.target_language,
+            keep_temp_audio=config.keep_temp_audio,
+        )
     if config.app_mode == "mock":
         recognizer = MockSpeechRecognizer()
         translator = MockTranslator()
@@ -50,8 +62,10 @@ def main() -> int:
         return 2
     configure_logging(config.log_level)
     logger.info(
-        "Application starting mode=%s asr_model=%s translation_model=%s tts_model=%s",
+        "Application starting mode=%s interpreter_mode=%s asr_model=%s "
+        "translation_model=%s tts_model=%s",
         config.app_mode,
+        config.interpreter_mode,
         config.asr_model,
         config.translation_model,
         config.tts_model,
@@ -69,4 +83,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

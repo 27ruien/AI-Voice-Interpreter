@@ -31,12 +31,16 @@ class DashScopeSpeechRecognizer:
             configure_dashscope(self.config)
             from dashscope.audio.asr import Recognition
 
+            recognition_kwargs = {}
+            if self.config.dashscope_workspace_id:
+                recognition_kwargs["workspace"] = self.config.dashscope_workspace_id
             recognition = Recognition(
                 model=self.config.asr_model,
                 format="wav",
                 sample_rate=self.config.audio_sample_rate,
                 language_hints=[self.config.source_language],
                 callback=None,
+                **recognition_kwargs,
             )
             response = recognition.call(str(audio_path))
             request_id = recognition.get_last_request_id() or request_id_from(response)

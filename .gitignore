@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+!server/.env.example
 .venv/
 __pycache__/
 *.py[cod]
@@ -26,3 +27,4 @@ screenshots/
 *screenshot*.png
 *-ui.png
 .ai-voice-interpreter/
+remote-smoke-output/
