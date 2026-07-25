@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import logging
+import shutil
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import Qt, QThread
 from PySide6.QtGui import QCloseEvent, QFont
 from PySide6.QtWidgets import (
+    QComboBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -24,7 +27,7 @@ from ..audio.recorder import MicrophoneRecorder
 from ..config import AppConfig
 from ..exceptions import InterpreterError
 from ..models import PipelineResult, ProcessingStatus
-from .workers import PlaybackWorker, ProcessingWorker
+from .workers import PlaybackWorker, ProcessingWorker, StreamingWorker
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +54,7 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         self.setWindowTitle("AI Voice Interpreter")
-        self.setMinimumSize(820, 720)
+        self.setMinimumSize(1050, 760)
         root = QWidget()
         layout = QVBoxLayout(root)
         layout.setContentsMargins(28, 24, 28, 24)
@@ -59,7 +62,7 @@ class MainWindow(QMainWindow):
 
         title = QLabel("AI Voice Interpreter")
         title.setFont(QFont("", 24, QFont.Weight.Bold))
-        subtitle = QLabel("按句语音翻译 MVP · 中文 → English")
+        subtitle = QLabel("Turn-based Streaming 语音翻译 MVP · 中文 → English")
         subtitle.setStyleSheet("color: #64748b; font-size: 14px;")
         layout.addWidget(title)
         layout.addWidget(subtitle)
@@ -71,7 +74,7 @@ class MainWindow(QMainWindow):
                 "background: #fff7ed; color: #9a3412; padding: 10px; border-radius: 6px;"
             )
             layout.addWidget(banner)
-        elif self.config.interpreter_mode == "remote":
+        elif self.config.interpreter_mode in {"remote", "remote_stream"}:
             banner = QLabel(
                 "Remote Mode：录音将通过 HTTPS Gateway 处理；Mac 不保存 DashScope API Key。"
             )
@@ -80,6 +83,32 @@ class MainWindow(QMainWindow):
                 "background: #ecfdf5; color: #065f46; padding: 10px; border-radius: 6px;"
             )
             layout.addWidget(banner)
+
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("工作模式"))
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem("流式模式", "remote_stream")
+        self.mode_combo.addItem("按句模式", "remote")
+        selected = (
+            "remote_stream"
+            if self.config.app_mode == "real" and self.config.interpreter_mode == "remote_stream"
+            else "remote"
+        )
+        self.mode_combo.setCurrentIndex(self.mode_combo.findData(selected))
+        if self.config.app_mode == "mock":
+            self.mode_combo.setItemData(0, False, Qt.ItemDataRole.UserRole - 1)
+        self.mode_combo.currentIndexChanged.connect(self._mode_changed)
+        mode_row.addWidget(self.mode_combo)
+        mode_row.addWidget(QLabel("采集模式"))
+        self.capture_combo = QComboBox()
+        self.capture_combo.addItem("Safe Mode（播放时暂停麦克风）", "safe")
+        self.capture_combo.addItem("Headphones Mode（建议佩戴耳机）", "headphones")
+        self.capture_combo.setCurrentIndex(
+            self.capture_combo.findData(self.config.stream_capture_mode)
+        )
+        mode_row.addWidget(self.capture_combo)
+        mode_row.addStretch()
+        layout.addLayout(mode_row)
 
         status_row = QHBoxLayout()
         status_row.addWidget(QLabel("当前状态"))
@@ -90,6 +119,24 @@ class MainWindow(QMainWindow):
         status_row.addWidget(self.status_label)
         status_row.addStretch()
         layout.addLayout(status_row)
+
+        stream_status = QGridLayout()
+        self.stream_labels: dict[str, QLabel] = {}
+        for index, (key, title_text) in enumerate(
+            (
+                ("connection", "连接"),
+                ("microphone", "麦克风"),
+                ("vad", "VAD"),
+                ("turn", "Turn"),
+                ("fallback", "Fallback"),
+            )
+        ):
+            stream_status.addWidget(QLabel(title_text), 0, index)
+            value = QLabel("—")
+            value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            stream_status.addWidget(value, 1, index)
+            self.stream_labels[key] = value
+        layout.addLayout(stream_status)
 
         button_row = QHBoxLayout()
         self.start_button = QPushButton("开始录音")
@@ -125,10 +172,12 @@ class MainWindow(QMainWindow):
         metrics_layout = QGridLayout(metrics_frame)
         self.latency_labels: dict[str, QLabel] = {}
         metrics = (
-            ("asr", "ASR 延迟"),
-            ("translation", "翻译延迟"),
-            ("tts", "TTS 延迟"),
-            ("total", "总延迟"),
+            ("asr", "First ASR Partial"),
+            ("finalize", "Turn Finalization"),
+            ("translation", "Translation First Token"),
+            ("tts", "TTS First Audio"),
+            ("playback", "Client First Playback"),
+            ("total", "Turn Total"),
         )
         for column, (key, label) in enumerate(metrics):
             metrics_layout.addWidget(QLabel(label), 0, column, Qt.AlignmentFlag.AlignCenter)
@@ -146,11 +195,12 @@ class MainWindow(QMainWindow):
         self.error_text.setStyleSheet("color: #b91c1c;")
         layout.addWidget(self.error_text)
         self.setCentralWidget(root)
+        self._mode_changed()
 
     def _show_startup_notice(self) -> None:
         if (
             self.config.app_mode == "real"
-            and self.config.interpreter_mode == "remote"
+            and self.config.interpreter_mode in {"remote", "remote_stream"}
             and not self.config.ai_gateway_token
         ):
             self.error_text.setPlainText(
@@ -165,6 +215,9 @@ class MainWindow(QMainWindow):
 
     def _start_recording(self) -> None:
         if self._thread is not None:
+            return
+        if self.mode_combo.currentData() == "remote_stream":
+            self._start_streaming()
             return
         try:
             self.player.stop()
@@ -181,6 +234,11 @@ class MainWindow(QMainWindow):
             self._fail(str(exc))
 
     def _stop_and_translate(self) -> None:
+        if isinstance(self._worker, StreamingWorker):
+            self._worker.request_stop()
+            self.status_label.setText("正在结束并刷新当前 Turn")
+            self.stop_button.setEnabled(False)
+            return
         try:
             audio_path = self.recorder.stop()
         except InterpreterError as exc:
@@ -228,11 +286,136 @@ class MainWindow(QMainWindow):
         self.source_text.setPlainText(result.recognized_text)
         self.target_text.setPlainText(result.translated_text)
         self.latency_labels["asr"].setText(_format_ms(result.asr_latency_ms))
+        self.latency_labels["finalize"].setText("—")
         self.latency_labels["translation"].setText(_format_ms(result.translation_latency_ms))
         self.latency_labels["tts"].setText(_format_ms(result.tts_latency_ms))
+        self.latency_labels["playback"].setText("—")
         self.latency_labels["total"].setText(_format_ms(result.total_latency_ms))
         if result.generated_audio_path is not None:
-            self.latest_audio_path = result.generated_audio_path
+            self._replace_latest_audio(result.generated_audio_path)
+
+    def _start_streaming(self) -> None:
+        try:
+            stream_config = replace(
+                self.config,
+                interpreter_mode="remote_stream",
+                stream_capture_mode=str(self.capture_combo.currentData()),
+            )
+            stream_config.validate_for_processing()
+            self.player.stop()
+            self.error_text.clear()
+            self.source_text.clear()
+            self.target_text.clear()
+            self._reset_latencies()
+            self._reset_stream_labels()
+            self.stream_labels["connection"].setText("连接中")
+            self.stream_labels["microphone"].setText("等待启动")
+            self.status_label.setText("正在建立流式连接")
+            self.start_button.setEnabled(False)
+            self.stop_button.setEnabled(True)
+            self.replay_button.setEnabled(False)
+            worker = StreamingWorker(stream_config, self.pipeline, self.player)
+            worker.event_received.connect(self._handle_stream_event)
+            worker.audio_ready.connect(self._stream_audio_ready)
+            worker.completed.connect(self._complete)
+            worker.failed.connect(self._fail)
+            self._start_worker(worker)
+        except Exception as exc:
+            self._fail(str(exc))
+
+    def _handle_stream_event(self, event: dict[str, Any]) -> None:
+        event_type = str(event.get("type", ""))
+        if event_type == "session.started":
+            self.stream_labels["connection"].setText("已连接")
+            self.stream_labels["microphone"].setText("Listening")
+            self.status_label.setText("Listening")
+        elif event_type == "vad.speech_start":
+            self.stream_labels["vad"].setText("Speech Detected")
+            self.stream_labels["turn"].setText("采集中")
+        elif event_type == "vad.speech_end":
+            self.stream_labels["vad"].setText("Silence")
+            self.stream_labels["turn"].setText("Finalizing Turn")
+        elif event_type == "asr.partial":
+            self.source_text.setPlainText(str(event.get("text", "")))
+        elif event_type == "asr.final":
+            self.source_text.setPlainText(str(event.get("text", "")))
+            self.stream_labels["turn"].setText("ASR Final")
+        elif event_type == "translation.partial":
+            self.target_text.setPlainText(str(event.get("text", "")))
+        elif event_type == "translation.final":
+            self.target_text.setPlainText(str(event.get("text", "")))
+            self.stream_labels["turn"].setText("Translation Final")
+        elif event_type == "tts.audio.start":
+            self.status_label.setText("Streaming Playback")
+            capture_status = (
+                "暂停（Safe）"
+                if self.capture_combo.currentData() == "safe"
+                else "持续（Headphones）"
+            )
+            self.stream_labels["microphone"].setText(capture_status)
+        elif event_type == "tts.audio.end":
+            self.stream_labels["microphone"].setText("Listening")
+        elif event_type == "turn.completed":
+            self._handle_completed_turn(event)
+        elif event_type == "warning":
+            if event.get("code") == "FALLBACK_REQUIRED":
+                self.stream_labels["fallback"].setText("HTTP Fallback")
+            self.error_text.setPlainText(str(event.get("message", "")))
+        elif event_type == "session.completed":
+            self.stream_labels["connection"].setText("已断开")
+
+    def _handle_completed_turn(self, event: dict[str, Any]) -> None:
+        self.stream_labels["turn"].setText("Completed")
+        self.source_text.setPlainText(str(event.get("recognized_text", "")))
+        self.target_text.setPlainText(str(event.get("translated_text", "")))
+        if event.get("fallback") == "http":
+            self.stream_labels["fallback"].setText("HTTP Fallback")
+        metrics = event.get("metrics", {})
+        if not isinstance(metrics, dict):
+            return
+        self.latency_labels["asr"].setText(
+            _format_ms(float(metrics.get("asr_first_partial_ms", metrics.get("asr_ms", 0))))
+        )
+        self.latency_labels["finalize"].setText(
+            _format_ms(float(metrics.get("turn_finalize_ms", 0)))
+        )
+        translation = metrics.get(
+            "translation_first_token_ms", metrics.get("translation_ms", 0)
+        )
+        self.latency_labels["translation"].setText(_format_ms(float(translation)))
+        self.latency_labels["tts"].setText(
+            _format_ms(float(metrics.get("tts_first_audio_ms", metrics.get("tts_ms", 0))))
+        )
+        self.latency_labels["playback"].setText(
+            _format_ms(float(metrics.get("client_first_playback_ms", 0)))
+        )
+        self.latency_labels["total"].setText(
+            _format_ms(float(metrics.get("turn_total_ms", 0)))
+        )
+
+    def _stream_audio_ready(self, path: Path) -> None:
+        self._replace_latest_audio(path)
+
+    def _replace_latest_audio(self, path: Path) -> None:
+        previous = self.latest_audio_path
+        if (
+            previous is not None
+            and previous != path
+            and previous.parent != path.parent
+            and previous.parent.name.startswith("aivi-stream-playback-")
+        ):
+            shutil.rmtree(previous.parent, ignore_errors=True)
+        self.latest_audio_path = path
+
+    def _mode_changed(self) -> None:
+        streaming = self.mode_combo.currentData() == "remote_stream"
+        self.capture_combo.setEnabled(streaming)
+        self.start_button.setText("开始同传" if streaming else "开始录音")
+        self.stop_button.setText("停止同传" if streaming else "停止并翻译")
+
+    def _reset_stream_labels(self) -> None:
+        for label in self.stream_labels.values():
+            label.setText("—")
 
     def _complete(self) -> None:
         self._set_status(ProcessingStatus.COMPLETED)
@@ -260,18 +443,27 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 (Qt API)
         logger.info("Application window closing")
         self.player.stop()
-        if self._thread is not None and self._thread.isRunning():
-            self._thread.quit()
-            if not self._thread.wait(3000):
-                self.error_text.setPlainText("后台请求仍在结束中，请稍候再次关闭窗口。")
-                event.ignore()
-                return
+        if isinstance(self._worker, StreamingWorker):
+            self._worker.request_stop()
+        if (
+            self._thread is not None
+            and self._thread.isRunning()
+            and not self._thread.wait(3000)
+        ):
+            self.error_text.setPlainText("后台请求仍在结束中，请稍候再次关闭窗口。")
+            event.ignore()
+            return
         self.recorder.cleanup()
         cleanup = getattr(self.pipeline, "cleanup", None)
         if not callable(cleanup):
             cleanup = getattr(getattr(self.pipeline, "text_to_speech", None), "cleanup", None)
         if callable(cleanup):
             cleanup()
+        if (
+            self.latest_audio_path is not None
+            and self.latest_audio_path.parent.name.startswith("aivi-stream-playback-")
+        ):
+            shutil.rmtree(self.latest_audio_path.parent, ignore_errors=True)
         event.accept()
 
 

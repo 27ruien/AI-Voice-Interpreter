@@ -10,3 +10,6 @@
 *.log
 screenshots
 remote-smoke-output
+stream-smoke-output
+benchmark-output
+soak-output

@@ -8,6 +8,7 @@ from PySide6.QtCore import QObject, Signal, Slot
 from ..audio.player import MacAudioPlayer
 from ..config import AppConfig
 from ..models import PipelineResult, ProcessingStatus
+from ..streaming.controller import StreamingSessionController
 
 
 class ProcessingWorker(QObject):
@@ -78,4 +79,38 @@ class PlaybackWorker(QObject):
         except Exception as exc:
             self.failed.emit(str(exc))
         finally:
+            self.finished.emit()
+
+
+class StreamingWorker(QObject):
+    event_received = Signal(object)
+    audio_ready = Signal(object)
+    completed = Signal()
+    failed = Signal(str)
+    finished = Signal()
+
+    def __init__(self, config: AppConfig, fallback_pipeline: Any, player: MacAudioPlayer) -> None:
+        super().__init__()
+        self.controller = StreamingSessionController(
+            config,
+            fallback_pipeline=fallback_pipeline,
+            fallback_player=player,
+        )
+
+    def request_stop(self) -> None:
+        self.controller.request_stop()
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self.controller.run(
+                on_event=self.event_received.emit,
+                on_audio_ready=self.audio_ready.emit,
+            )
+            self.completed.emit()
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            if self.controller.stream_player.last_turn_path is None:
+                self.controller.cleanup()
             self.finished.emit()

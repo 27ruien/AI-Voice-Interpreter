@@ -28,3 +28,6 @@ screenshots/
 *-ui.png
 .ai-voice-interpreter/
 remote-smoke-output/
+stream-smoke-output/
+benchmark-output/
+soak-output/

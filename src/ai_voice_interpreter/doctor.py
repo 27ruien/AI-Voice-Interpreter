@@ -19,6 +19,7 @@ REQUIRED_PACKAGES = (
     "dotenv",
     "sounddevice",
     "soundfile",
+    "websockets",
 )
 
 
@@ -114,11 +115,13 @@ def collect_checks(
                 "real" if real_mode else f"当前为 {config.app_mode}，真实验收前应设为 real",
             )
         )
-        if config.interpreter_mode == "remote":
+        if config.interpreter_mode in {"remote", "remote_stream"}:
             gateway_url = bool(config.ai_gateway_base_url)
             gateway_token = bool(config.ai_gateway_token)
             processing_configured = gateway_url and gateway_token
-            checks.append(DoctorCheck(CheckLevel.PASS, "INTERPRETER_MODE", "remote"))
+            checks.append(
+                DoctorCheck(CheckLevel.PASS, "INTERPRETER_MODE", config.interpreter_mode)
+            )
             checks.append(
                 DoctorCheck(
                     CheckLevel.PASS if gateway_url else CheckLevel.FAIL,
@@ -126,6 +129,7 @@ def collect_checks(
                     "已配置" if gateway_url else "未配置",
                 )
             )
+            checks.extend(_model_checks(config))
             checks.append(
                 DoctorCheck(
                     CheckLevel.PASS if gateway_token else CheckLevel.WARN,

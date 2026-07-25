@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 def build_pipeline(config: AppConfig) -> InterpreterPipeline | RemoteInterpreterPipeline:
-    if config.app_mode == "real" and config.interpreter_mode == "remote":
+    if config.app_mode == "real" and config.interpreter_mode in {"remote", "remote_stream"}:
         return RemoteInterpreterPipeline(
             GatewayClient(
                 config.ai_gateway_base_url,

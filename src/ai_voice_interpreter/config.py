@@ -38,7 +38,7 @@ def _as_bool(value: str | bool | None, default: bool = False) -> bool:
 @dataclass(frozen=True, slots=True)
 class AppConfig:
     app_mode: str = "real"
-    interpreter_mode: str = "remote"
+    interpreter_mode: str = "remote_stream"
     ai_gateway_base_url: str = "https://gridworks.cn/tool/ai-interpreter-api"
     ai_gateway_token: str = field(default="", repr=False)
     dashscope_api_key: str = field(default="", repr=False)
@@ -61,6 +61,14 @@ class AppConfig:
     keep_temp_audio: bool = False
     log_level: str = "INFO"
     network_timeout_seconds: float = 45.0
+    stream_audio_chunk_ms: int = 100
+    stream_send_queue_max_chunks: int = 50
+    stream_ring_buffer_seconds: int = 30
+    stream_playback_prebuffer_ms: int = 150
+    stream_playback_queue_max_seconds: int = 10
+    stream_playback_save_last_turn: bool = True
+    stream_capture_mode: str = "safe"
+    stream_http_fallback: bool = True
 
     @classmethod
     def load(
@@ -84,7 +92,7 @@ class AppConfig:
         try:
             config = cls(
                 app_mode=get("APP_MODE", "real").lower(),
-                interpreter_mode=get("INTERPRETER_MODE", "remote").lower(),
+                interpreter_mode=get("INTERPRETER_MODE", "remote_stream").lower(),
                 ai_gateway_base_url=get(
                     "AI_GATEWAY_BASE_URL",
                     "https://gridworks.cn/tool/ai-interpreter-api",
@@ -110,6 +118,22 @@ class AppConfig:
                 keep_temp_audio=_as_bool(values.get("KEEP_TEMP_AUDIO"), False),
                 log_level=get("LOG_LEVEL", "INFO").upper(),
                 network_timeout_seconds=float(get("NETWORK_TIMEOUT_SECONDS", "45")),
+                stream_audio_chunk_ms=int(get("STREAM_AUDIO_CHUNK_MS", "100")),
+                stream_send_queue_max_chunks=int(
+                    get("STREAM_SEND_QUEUE_MAX_CHUNKS", "50")
+                ),
+                stream_ring_buffer_seconds=int(get("STREAM_RING_BUFFER_SECONDS", "30")),
+                stream_playback_prebuffer_ms=int(
+                    get("STREAM_PLAYBACK_PREBUFFER_MS", "150")
+                ),
+                stream_playback_queue_max_seconds=int(
+                    get("STREAM_PLAYBACK_QUEUE_MAX_SECONDS", "10")
+                ),
+                stream_playback_save_last_turn=_as_bool(
+                    values.get("STREAM_PLAYBACK_SAVE_LAST_TURN"), True
+                ),
+                stream_capture_mode=get("STREAM_CAPTURE_MODE", "safe").lower(),
+                stream_http_fallback=_as_bool(values.get("STREAM_HTTP_FALLBACK"), True),
             )
         except ValueError as exc:
             raise ConfigurationError(f"配置值格式错误：{exc}") from exc
@@ -119,14 +143,22 @@ class AppConfig:
     def validate_basic(self) -> None:
         if self.app_mode not in {"real", "mock"}:
             raise ConfigurationError("APP_MODE 必须是 real 或 mock。")
-        if self.interpreter_mode not in {"remote", "local"}:
-            raise ConfigurationError("INTERPRETER_MODE 必须是 remote 或 local。")
+        if self.interpreter_mode not in {"remote", "remote_stream", "local"}:
+            raise ConfigurationError(
+                "INTERPRETER_MODE 必须是 remote_stream、remote 或 local。"
+            )
         if self.dashscope_region not in DEFAULT_HTTP_URLS:
             raise ConfigurationError("DASHSCOPE_REGION 必须是 beijing 或 singapore。")
         if self.audio_sample_rate <= 0 or self.audio_channels != 1:
             raise ConfigurationError("当前 MVP 要求正采样率和 AUDIO_CHANNELS=1。")
         if self.network_timeout_seconds <= 0:
             raise ConfigurationError("NETWORK_TIMEOUT_SECONDS 必须大于 0。")
+        if self.stream_audio_chunk_ms <= 0 or self.stream_send_queue_max_chunks <= 0:
+            raise ConfigurationError("流式分块和发送队列配置必须大于 0。")
+        if self.stream_ring_buffer_seconds <= 0 or self.stream_playback_queue_max_seconds <= 0:
+            raise ConfigurationError("流式 Ring Buffer 和播放队列配置必须大于 0。")
+        if self.stream_capture_mode not in {"safe", "headphones"}:
+            raise ConfigurationError("STREAM_CAPTURE_MODE 必须是 safe 或 headphones。")
         if self.cloned_voice_id and not self.cloned_voice_id.startswith(f"{self.tts_model}-"):
             raise ConfigurationError(
                 "CLONED_VOICE_ID 与 TTS_MODEL 不匹配；复刻和合成必须使用同一模型。"
@@ -142,7 +174,7 @@ class AppConfig:
 
     def validate_for_processing(self) -> None:
         self.validate_basic()
-        if self.app_mode == "real" and self.interpreter_mode == "remote":
+        if self.app_mode == "real" and self.interpreter_mode in {"remote", "remote_stream"}:
             if not self.ai_gateway_base_url.startswith(("http://", "https://")):
                 raise ConfigurationError("远程模式的 AI_GATEWAY_BASE_URL 必须是 HTTP(S) 地址。")
             if not self.ai_gateway_token:

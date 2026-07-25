@@ -10,6 +10,17 @@ from dotenv import dotenv_values
 from ai_voice_interpreter.config import AppConfig
 
 
+def _as_bool(value: str, default: bool) -> bool:
+    if not value:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"无法解析布尔配置：{value}")
+
+
 @dataclass(frozen=True, slots=True)
 class ServerConfig:
     app_env: str = "production"
@@ -29,6 +40,32 @@ class ServerConfig:
     audio_ttl_seconds: int = 300
     request_timeout_seconds: float = 120.0
     temp_audio_dir: Path = Path("/tmp/ai-voice-interpreter")
+    streaming_enabled: bool = True
+    streaming_protocol_version: str = "1.0"
+    streaming_max_session_seconds: int = 3600
+    streaming_max_connections: int = 2
+    streaming_max_connections_per_token: int = 1
+    streaming_heartbeat_seconds: int = 20
+    streaming_heartbeat_timeout_seconds: int = 60
+    streaming_max_frame_bytes: int = 65536
+    stream_audio_sample_rate: int = 16000
+    stream_audio_channels: int = 1
+    stream_audio_chunk_ms: int = 100
+    stream_audio_queue_max_chunks: int = 50
+    vad_enabled: bool = True
+    vad_frame_ms: int = 20
+    vad_aggressiveness: int = 2
+    vad_min_speech_ms: int = 250
+    vad_silence_ms: int = 650
+    vad_pre_roll_ms: int = 200
+    vad_max_turn_ms: int = 15000
+    tts_text_min_chars: int = 20
+    tts_text_target_chars: int = 48
+    tts_text_max_chars: int = 90
+    tts_text_max_wait_ms: int = 300
+    stream_turn_queue_max: int = 3
+    stream_tts_text_queue_max: int = 10
+    stream_tts_audio_queue_max_chunks: int = 100
 
     @classmethod
     def load(
@@ -65,6 +102,42 @@ class ServerConfig:
             audio_ttl_seconds=int(get("AUDIO_TTL_SECONDS", "300")),
             request_timeout_seconds=float(get("REQUEST_TIMEOUT_SECONDS", "120")),
             temp_audio_dir=Path(get("TEMP_AUDIO_DIR", "/tmp/ai-voice-interpreter")),
+            streaming_enabled=_as_bool(get("STREAMING_ENABLED", "true"), True),
+            streaming_protocol_version=get("STREAMING_PROTOCOL_VERSION", "1.0"),
+            streaming_max_session_seconds=int(
+                get("STREAMING_MAX_SESSION_SECONDS", "3600")
+            ),
+            streaming_max_connections=int(get("STREAMING_MAX_CONNECTIONS", "2")),
+            streaming_max_connections_per_token=int(
+                get("STREAMING_MAX_CONNECTIONS_PER_TOKEN", "1")
+            ),
+            streaming_heartbeat_seconds=int(get("STREAMING_HEARTBEAT_SECONDS", "20")),
+            streaming_heartbeat_timeout_seconds=int(
+                get("STREAMING_HEARTBEAT_TIMEOUT_SECONDS", "60")
+            ),
+            streaming_max_frame_bytes=int(get("STREAMING_MAX_FRAME_BYTES", "65536")),
+            stream_audio_sample_rate=int(get("STREAM_AUDIO_SAMPLE_RATE", "16000")),
+            stream_audio_channels=int(get("STREAM_AUDIO_CHANNELS", "1")),
+            stream_audio_chunk_ms=int(get("STREAM_AUDIO_CHUNK_MS", "100")),
+            stream_audio_queue_max_chunks=int(
+                get("STREAM_AUDIO_QUEUE_MAX_CHUNKS", "50")
+            ),
+            vad_enabled=_as_bool(get("VAD_ENABLED", "true"), True),
+            vad_frame_ms=int(get("VAD_FRAME_MS", "20")),
+            vad_aggressiveness=int(get("VAD_AGGRESSIVENESS", "2")),
+            vad_min_speech_ms=int(get("VAD_MIN_SPEECH_MS", "250")),
+            vad_silence_ms=int(get("VAD_SILENCE_MS", "650")),
+            vad_pre_roll_ms=int(get("VAD_PRE_ROLL_MS", "200")),
+            vad_max_turn_ms=int(get("VAD_MAX_TURN_MS", "15000")),
+            tts_text_min_chars=int(get("TTS_TEXT_MIN_CHARS", "20")),
+            tts_text_target_chars=int(get("TTS_TEXT_TARGET_CHARS", "48")),
+            tts_text_max_chars=int(get("TTS_TEXT_MAX_CHARS", "90")),
+            tts_text_max_wait_ms=int(get("TTS_TEXT_MAX_WAIT_MS", "300")),
+            stream_turn_queue_max=int(get("STREAM_TURN_QUEUE_MAX", "3")),
+            stream_tts_text_queue_max=int(get("STREAM_TTS_TEXT_QUEUE_MAX", "10")),
+            stream_tts_audio_queue_max_chunks=int(
+                get("STREAM_TTS_AUDIO_QUEUE_MAX_CHUNKS", "100")
+            ),
         )
         config.validate()
         return config
@@ -85,6 +158,45 @@ class ServerConfig:
             raise ValueError("上传大小和并发数必须大于 0。")
         if self.audio_ttl_seconds <= 0 or self.request_timeout_seconds <= 0:
             raise ValueError("TTL 和请求超时必须大于 0。")
+        positive_stream_values = (
+            self.streaming_max_session_seconds,
+            self.streaming_max_connections,
+            self.streaming_max_connections_per_token,
+            self.streaming_heartbeat_seconds,
+            self.streaming_heartbeat_timeout_seconds,
+            self.streaming_max_frame_bytes,
+            self.stream_audio_chunk_ms,
+            self.stream_audio_queue_max_chunks,
+            self.vad_min_speech_ms,
+            self.vad_silence_ms,
+            self.vad_max_turn_ms,
+            self.tts_text_max_wait_ms,
+            self.stream_turn_queue_max,
+            self.stream_tts_text_queue_max,
+            self.stream_tts_audio_queue_max_chunks,
+        )
+        if any(value <= 0 for value in positive_stream_values):
+            raise ValueError("流式容量和超时配置必须大于 0。")
+        if self.streaming_heartbeat_timeout_seconds <= self.streaming_heartbeat_seconds:
+            raise ValueError("心跳超时必须大于心跳间隔。")
+        if self.streaming_protocol_version != "1.0":
+            raise ValueError("当前服务器仅支持 STREAMING_PROTOCOL_VERSION=1.0。")
+        if self.streaming_enabled and not self.vad_enabled:
+            raise ValueError("当前 Turn-based Streaming 必须启用 VAD。")
+        if self.stream_audio_sample_rate != 16000 or self.stream_audio_channels != 1:
+            raise ValueError("流式输入当前要求 16 kHz 单声道。")
+        if self.vad_frame_ms not in {10, 20, 30} or not 0 <= self.vad_aggressiveness <= 3:
+            raise ValueError("VAD_FRAME_MS 必须是 10/20/30，VAD_AGGRESSIVENESS 必须是 0–3。")
+        if self.stream_audio_chunk_ms % self.vad_frame_ms:
+            raise ValueError("STREAM_AUDIO_CHUNK_MS 必须能被 VAD_FRAME_MS 整除。")
+        if self.vad_pre_roll_ms < 0:
+            raise ValueError("VAD_PRE_ROLL_MS 不能为负数。")
+        if not (
+            0 < self.tts_text_min_chars
+            <= self.tts_text_target_chars
+            <= self.tts_text_max_chars
+        ):
+            raise ValueError("TTS 文本分段字符阈值顺序无效。")
 
     def provider_config(self) -> AppConfig:
         return AppConfig(

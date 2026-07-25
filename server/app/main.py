@@ -8,17 +8,25 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Request, UploadFile, WebSocket
 from fastapi.responses import FileResponse, JSONResponse
 
+from ai_voice_interpreter import __version__
 from ai_voice_interpreter.logging_config import configure_logging
 from ai_voice_interpreter.pipeline import InterpreterPipeline
+from ai_voice_interpreter.streaming.protocol import ErrorCode
 
 from .audio_store import AudioStore, validate_wav
 from .auth import BearerTokenAuth
 from .config import ServerConfig
 from .errors import GatewayHTTPError
 from .pipeline import build_server_pipeline, generated_audio_size
+from .streaming.session import (
+    StreamDependencies,
+    StreamingConnectionRegistry,
+    StreamingSession,
+    bearer_token_from_header,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +52,7 @@ def create_app(
     config: ServerConfig | None = None,
     *,
     pipeline: InterpreterPipeline | Any | None = None,
+    stream_dependencies: StreamDependencies | None = None,
 ) -> FastAPI:
     settings = config or ServerConfig.load()
     configure_logging(settings.log_level)
@@ -51,6 +60,11 @@ def create_app(
     processor = pipeline or build_server_pipeline(settings)
     auth = BearerTokenAuth(settings.client_test_token)
     gate = ConcurrencyGate(settings.max_concurrent_requests)
+    streaming = stream_dependencies or StreamDependencies.real(settings)
+    stream_registry = StreamingConnectionRegistry(
+        settings.streaming_max_connections,
+        settings.streaming_max_connections_per_token,
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -62,7 +76,7 @@ def create_app(
 
     app = FastAPI(
         title="AI Voice Interpreter Gateway",
-        version="1.0.0",
+        version=__version__,
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
@@ -72,6 +86,7 @@ def create_app(
     app.state.audio_store = store
     app.state.pipeline = processor
     app.state.gate = gate
+    app.state.stream_registry = stream_registry
 
     @app.middleware("http")
     async def request_context(request: Request, call_next: Any) -> Any:
@@ -112,7 +127,40 @@ def create_app(
             "api_key": "configured",
             "providers": "initialized",
             "temp_directory": "writable",
+            "streaming": {
+                "enabled": settings.streaming_enabled,
+                "protocol_version": settings.streaming_protocol_version,
+                "active_sessions": stream_registry.active,
+            },
         }
+
+    @app.websocket("/v1/stream")
+    async def stream(websocket: WebSocket) -> None:
+        token = bearer_token_from_header(
+            websocket.headers.get("authorization"), settings.client_test_token
+        )
+        if token is None:
+            await websocket.close(code=4401, reason="Bearer Token missing or invalid")
+            return
+        if not settings.streaming_enabled:
+            await websocket.close(code=4403, reason="Streaming disabled")
+            return
+        if not await stream_registry.acquire(token):
+            await websocket.close(code=4429, reason="Streaming session limit reached")
+            return
+        await websocket.accept()
+        session = StreamingSession(websocket, settings, streaming)
+        try:
+            await asyncio.wait_for(
+                session.run(), timeout=settings.streaming_max_session_seconds
+            )
+        except TimeoutError:
+            await session._safe_error(  # noqa: SLF001 - route owns the session lifecycle.
+                ErrorCode.SESSION_TIMEOUT, "流式会话达到最长时限。"
+            )
+        finally:
+            await session.cleanup()
+            await stream_registry.release(token)
 
     @app.post("/v1/interpret", dependencies=[Depends(auth)])
     async def interpret(
