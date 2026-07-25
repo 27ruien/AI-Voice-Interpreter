@@ -2,5 +2,9 @@ dashscope>=1.26.4,<2
 fastapi>=0.115,<1
 python-dotenv>=1.0,<2
 python-multipart>=0.0.20,<1
-uvicorn[standard]>=0.34,<1
+# The gateway only needs Uvicorn's h11/WebSocket runtime.  Avoid the
+# development-oriented "standard" extra because its optional httptools/uvloop
+# wheels make production image resolution platform-dependent.
+uvicorn>=0.34,<1
+websockets>=14,<17
 webrtcvad-wheels>=2.0.14,<3
