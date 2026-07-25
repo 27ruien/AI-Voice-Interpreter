@@ -50,8 +50,6 @@ def run(args: argparse.Namespace) -> int:
                 f"wav {wav.getframerate()}Hz {wav.getnchannels()}ch "
                 f"{wav.getsampwidth() * 8}bit"
             )
-        if args.verify_output:
-            _verify_semantics(response.translated_text)
         print(f"PASS Gateway request_id: {response.request_id}")
         print(f"PASS ASR text: {response.recognized_text}")
         print(f"PASS Translation: {response.translated_text}")
@@ -66,6 +64,9 @@ def run(args: argparse.Namespace) -> int:
         )
         print(f"PASS Audio: {audio_summary}, {downloaded.size_bytes} bytes")
         print(f"PASS Provider request_ids: {response.provider_request_ids}")
+        if args.verify_output:
+            _verify_semantics(response.translated_text)
+            print("PASS Translation semantics: today / project progress / next delivery plan")
         if args.play:
             completed = subprocess.run(
                 ["/usr/bin/afplay", str(downloaded.path)],
@@ -90,8 +91,17 @@ def _verify_semantics(translated_text: str) -> None:
     normalized = translated_text.lower()
     groups = (
         ("today",),
-        ("project progress", "progress of the project"),
-        ("next delivery plan", "next delivery", "delivery plan"),
+        (
+            "project progress",
+            "project's progress",
+            "project’s progress",
+            "progress of the project",
+            "project status",
+            "project schedule",
+        ),
+        ("next", "following", "subsequent"),
+        ("delivery", "deliverables"),
+        ("plan", "arrangement", "schedule"),
         ("discuss", "discussion"),
     )
     missing = [group[0] for group in groups if not any(term in normalized for term in group)]

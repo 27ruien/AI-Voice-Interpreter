@@ -31,6 +31,7 @@ server-lint:
 	$(VENV_PYTHON) -m ruff check server
 
 REMOTE_SMOKE_AUDIO ?= /tmp/ai-interpreter-test.wav
+REMOTE_SMOKE_FLAGS ?=
 remote-smoke:
 	$(VENV_PYTHON) -m ai_voice_interpreter.remote_smoke \
-		--audio "$(REMOTE_SMOKE_AUDIO)" --verify-output
+		--audio "$(REMOTE_SMOKE_AUDIO)" --verify-output $(REMOTE_SMOKE_FLAGS)

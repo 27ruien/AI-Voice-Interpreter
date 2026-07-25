@@ -9,6 +9,7 @@ from ai_voice_interpreter.exceptions import GatewayError
 from ai_voice_interpreter.models import ProcessingStatus
 from ai_voice_interpreter.remote.gateway_client import GatewayClient
 from ai_voice_interpreter.remote.pipeline import RemoteInterpreterPipeline
+from ai_voice_interpreter.remote_smoke import _verify_semantics
 
 
 def make_wav(path: Path) -> Path:
@@ -118,3 +119,16 @@ def test_gateway_response_does_not_require_or_expose_token(tmp_path: Path) -> No
     response = httpx.Response(200, content=json.dumps(payload()).encode())
     assert "token" not in response.text.lower()
     assert audio.is_file()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Hello, today we will mainly discuss the project progress and the next delivery plan.",
+        "Today, our discussion will focus on project status and subsequent delivery arrangements.",
+        "Hello, today we’ll primarily discuss the project’s progress and the plan for the next "
+        "phase of delivery.",
+    ],
+)
+def test_remote_smoke_semantic_check_accepts_equivalent_wording(text: str) -> None:
+    _verify_semantics(text)
