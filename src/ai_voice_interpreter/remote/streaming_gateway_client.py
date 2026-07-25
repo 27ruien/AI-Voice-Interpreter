@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import logging
 import platform
+import ssl
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+import certifi
 from websockets.sync.client import ClientConnection, connect
 
 from .. import __version__
@@ -78,6 +80,7 @@ class StreamingGatewayClient:
             connection = self._connect_factory(
                 self.websocket_url,
                 additional_headers={"Authorization": f"Bearer {self.token}"},
+                ssl=self._ssl_context(),
                 open_timeout=self.timeout_seconds,
                 close_timeout=5,
                 ping_interval=20,
@@ -157,6 +160,11 @@ class StreamingGatewayClient:
         if self._connection is None:
             raise GatewayError("流式连接尚未建立。", self.request_id)
         return self._connection
+
+    def _ssl_context(self) -> ssl.SSLContext | None:
+        if self.websocket_url.startswith("wss://"):
+            return ssl.create_default_context(cafile=certifi.where())
+        return None
 
     @staticmethod
     def _parse_event(raw: str) -> dict[str, Any]:

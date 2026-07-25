@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import ssl
 import wave
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,8 @@ def test_streaming_client_uses_header_and_parses_binary() -> None:
     assert client.websocket_url == "wss://example.test/tool/gateway/v1/stream"
     assert client.open()["type"] == "session.started"
     assert captured["additional_headers"] == {"Authorization": "Bearer local-token"}
+    assert isinstance(captured["ssl"], ssl.SSLContext)
+    assert captured["ssl"].verify_mode == ssl.CERT_REQUIRED
     assert "local-token" not in captured["url"]
     start = json.loads(connection.sent[0])
     assert start["audio"] == {
