@@ -35,6 +35,7 @@ def config(tmp_path: Path, **overrides: object) -> ServerConfig:
         "vad_min_speech_ms": 60,
         "vad_silence_ms": 60,
         "vad_pre_roll_ms": 20,
+        "stream_pipeline_provider": "modular",
     }
     values.update(overrides)
     return ServerConfig(**values)

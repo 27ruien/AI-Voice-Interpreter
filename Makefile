@@ -1,4 +1,4 @@
-.PHONY: setup run test lint mock doctor server-test server-lint remote-smoke stream-test stream-smoke stream-benchmark stream-soak
+.PHONY: setup run test lint mock doctor server-test server-lint remote-smoke stream-test stream-smoke stream-benchmark stream-soak livetranslate-test provider-permission-smoke livetranslate-smoke pipeline-benchmark
 
 PYTHON ?= python3
 VENV := .venv
@@ -39,6 +39,21 @@ remote-smoke:
 stream-test:
 	$(VENV_PYTHON) -m pytest tests/streaming server/tests/streaming
 
+livetranslate-test:
+	$(VENV_PYTHON) -m pytest \
+		server/tests/streaming/test_livetranslate_provider.py \
+		server/tests/streaming/test_livetranslate_gateway.py \
+		server/tests/streaming/test_mock_livetranslate.py
+
+provider-permission-smoke:
+	./scripts/provider_permission_smoke.sh
+
+LIVETRANSLATE_SMOKE_FLAGS ?=
+livetranslate-smoke:
+	$(VENV_PYTHON) -m ai_voice_interpreter.livetranslate_smoke \
+		--json-report livetranslate-smoke-output/report.json \
+		$(LIVETRANSLATE_SMOKE_FLAGS)
+
 STREAM_SMOKE_AUDIO ?= /tmp/ai-interpreter-stream-test.wav
 STREAM_SMOKE_FLAGS ?=
 stream-smoke:
@@ -50,6 +65,9 @@ STREAM_BENCHMARK_RUNS ?= 20
 stream-benchmark:
 	$(VENV_PYTHON) -m ai_voice_interpreter.stream_benchmark \
 		--runs "$(STREAM_BENCHMARK_RUNS)"
+
+pipeline-benchmark:
+	$(VENV_PYTHON) -m ai_voice_interpreter.pipeline_benchmark
 
 SOAK_MINUTES ?= 30
 stream-soak:

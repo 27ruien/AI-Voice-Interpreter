@@ -1,7 +1,16 @@
 from pathlib import Path
 
 from ai_voice_interpreter.config import AppConfig
-from ai_voice_interpreter.doctor import CheckLevel, collect_checks, format_report
+from ai_voice_interpreter.doctor import (
+    CheckLevel,
+    GatewayProbeResult,
+    collect_checks,
+    format_report,
+)
+
+
+def gateway_ok(_config: AppConfig) -> GatewayProbeResult:
+    return GatewayProbeResult(True, True, True, "livetranslate", "200 readyz")
 
 
 def executable_afplay(tmp_path: Path) -> Path:
@@ -27,6 +36,7 @@ def test_doctor_reports_ready_without_calling_any_api(tmp_path: Path) -> None:
         microphone_probe=lambda: (True, "测试麦克风可用"),
         afplay_path=executable_afplay(tmp_path),
         temp_directory=tmp_path,
+        gateway_probe=gateway_ok,
     )
     assert report.ready_for_real_mode
     assert imported
@@ -43,6 +53,7 @@ def test_doctor_hides_key_and_warns_when_missing(tmp_path: Path) -> None:
         microphone_probe=lambda: (True, "测试麦克风可用"),
         afplay_path=executable_afplay(tmp_path),
         temp_directory=tmp_path,
+        gateway_probe=gateway_ok,
     )
     output = format_report(report)
     assert not report.ready_for_real_mode
@@ -64,6 +75,7 @@ def test_doctor_reports_missing_dependency_as_failure(tmp_path: Path) -> None:
         microphone_probe=lambda: (True, "测试麦克风可用"),
         afplay_path=executable_afplay(tmp_path),
         temp_directory=tmp_path,
+        gateway_probe=gateway_ok,
     )
     package_check = next(check for check in report.checks if check.name == "Python packages")
     assert package_check.level == CheckLevel.FAIL

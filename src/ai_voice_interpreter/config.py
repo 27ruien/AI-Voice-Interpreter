@@ -69,6 +69,7 @@ class AppConfig:
     stream_playback_save_last_turn: bool = True
     stream_capture_mode: str = "safe"
     stream_http_fallback: bool = True
+    stream_voice_mode: str = "standard"
 
     @classmethod
     def load(
@@ -134,6 +135,7 @@ class AppConfig:
                 ),
                 stream_capture_mode=get("STREAM_CAPTURE_MODE", "safe").lower(),
                 stream_http_fallback=_as_bool(values.get("STREAM_HTTP_FALLBACK"), True),
+                stream_voice_mode=get("STREAM_VOICE_MODE", "standard").lower(),
             )
         except ValueError as exc:
             raise ConfigurationError(f"配置值格式错误：{exc}") from exc
@@ -159,6 +161,8 @@ class AppConfig:
             raise ConfigurationError("流式 Ring Buffer 和播放队列配置必须大于 0。")
         if self.stream_capture_mode not in {"safe", "headphones"}:
             raise ConfigurationError("STREAM_CAPTURE_MODE 必须是 safe 或 headphones。")
+        if self.stream_voice_mode not in {"standard", "clone_once"}:
+            raise ConfigurationError("STREAM_VOICE_MODE 必须是 standard 或 clone_once。")
         if self.cloned_voice_id and not self.cloned_voice_id.startswith(f"{self.tts_model}-"):
             raise ConfigurationError(
                 "CLONED_VOICE_ID 与 TTS_MODEL 不匹配；复刻和合成必须使用同一模型。"

@@ -104,9 +104,47 @@ def test_health_and_ready_are_non_secret(
     assert health.json()["service"] == "ai-voice-interpreter-gateway"
     assert ready.status_code == 200
     assert ready.json()["api_key"] == "configured"
+    streaming = ready.json()["streaming"]
+    assert streaming["configured_stream_provider"] == "livetranslate"
+    assert streaming["fallback_provider"] == "modular"
+    assert streaming["livetranslate_model_configured"] is True
+    assert streaming["workspace_configured"] is True
+    assert streaming["voice_clone_enabled"] is False
+    assert streaming["source_transcription_enabled"] is True
     assert pipeline.calls == 0
     assert API_KEY not in health.text + ready.text
     assert TOKEN not in health.text + ready.text
+
+
+def test_readyz_reports_invalid_stream_provider_without_silent_fallback(
+    tmp_path: Path,
+) -> None:
+    config = settings(tmp_path, stream_pipeline_provider="unknown")
+    client = TestClient(create_app(config, pipeline=FakePipeline(config.temp_audio_dir)))
+    response = client.get("/readyz")
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "stream_provider_configuration_error"
+
+
+def test_server_config_loads_livetranslate_hotwords_without_secrets(
+    tmp_path: Path,
+) -> None:
+    env_path = tmp_path / "server.env"
+    env_path.write_text(
+        "\n".join(
+            (
+                "DASHSCOPE_API_KEY=secret",
+                "DASHSCOPE_WORKSPACE_ID=workspace",
+                "DASHSCOPE_NATIVE_BASE_URL=https://workspace.example/api/v1",
+                "CLIENT_TEST_TOKEN=token",
+                'LIVETRANSLATE_HOTWORDS_JSON={"项目进度":"project progress"}',
+            )
+        ),
+        encoding="utf-8",
+    )
+    loaded = ServerConfig.load(env_path, environ={})
+    assert loaded.livetranslate_hotwords == {"项目进度": "project progress"}
+    assert "secret" not in repr(loaded)
 
 
 @pytest.mark.parametrize("headers", [{}, auth("wrong-token")])

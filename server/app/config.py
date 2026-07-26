@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -67,6 +68,23 @@ class ServerConfig:
     stream_turn_queue_max: int = 3
     stream_tts_text_queue_max: int = 10
     stream_tts_audio_queue_max_chunks: int = 100
+    stream_pipeline_provider: str = "livetranslate"
+    stream_pipeline_fallback_provider: str = "modular"
+    allow_stream_pipeline_override: bool = False
+    livetranslate_model: str = "qwen3.5-livetranslate-flash-realtime"
+    livetranslate_source_language: str = "zh"
+    livetranslate_target_language: str = "en"
+    livetranslate_output_modalities: tuple[str, ...] = ("text", "audio")
+    livetranslate_voice: str = "Tina"
+    livetranslate_enable_source_transcription: bool = True
+    livetranslate_source_asr_model: str = "qwen3-asr-flash-realtime"
+    livetranslate_source_transcription_fallback: str = "none"
+    livetranslate_enable_voice_clone: bool = False
+    livetranslate_voice_clone_frequency: str = "once"
+    livetranslate_connect_timeout_seconds: float = 15.0
+    livetranslate_session_finish_timeout_seconds: float = 20.0
+    livetranslate_audio_queue_max_chunks: int = 100
+    livetranslate_hotwords: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def load(
@@ -82,6 +100,21 @@ class ServerConfig:
 
         def get(name: str, default: str) -> str:
             return str(values.get(name, default)).strip()
+
+        def get_json_map(name: str) -> dict[str, str]:
+            raw = get(name, "")
+            if not raw:
+                return {}
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"{name} 必须是 JSON 对象。") from exc
+            if not isinstance(parsed, dict) or not all(
+                isinstance(key, str) and isinstance(value, str)
+                for key, value in parsed.items()
+            ):
+                raise ValueError(f"{name} 必须是字符串到字符串的 JSON 对象。")
+            return {key.strip(): value.strip() for key, value in parsed.items() if key.strip()}
 
         config = cls(
             app_env=get("APP_ENV", "production"),
@@ -140,6 +173,55 @@ class ServerConfig:
             stream_tts_audio_queue_max_chunks=int(
                 get("STREAM_TTS_AUDIO_QUEUE_MAX_CHUNKS", "100")
             ),
+            stream_pipeline_provider=get(
+                "STREAM_PIPELINE_PROVIDER", "livetranslate"
+            ).lower(),
+            stream_pipeline_fallback_provider=get(
+                "STREAM_PIPELINE_FALLBACK_PROVIDER", "modular"
+            ).lower(),
+            allow_stream_pipeline_override=_as_bool(
+                get("ALLOW_STREAM_PIPELINE_OVERRIDE", "false"), False
+            ),
+            livetranslate_model=get(
+                "LIVETRANSLATE_MODEL", "qwen3.5-livetranslate-flash-realtime"
+            ),
+            livetranslate_source_language=get(
+                "LIVETRANSLATE_SOURCE_LANGUAGE", "zh"
+            ).lower(),
+            livetranslate_target_language=get(
+                "LIVETRANSLATE_TARGET_LANGUAGE", "en"
+            ).lower(),
+            livetranslate_output_modalities=tuple(
+                part.strip().lower()
+                for part in get("LIVETRANSLATE_OUTPUT_MODALITIES", "text,audio").split(",")
+                if part.strip()
+            ),
+            livetranslate_voice=get("LIVETRANSLATE_VOICE", "Tina"),
+            livetranslate_enable_source_transcription=_as_bool(
+                get("LIVETRANSLATE_ENABLE_SOURCE_TRANSCRIPTION", "true"), True
+            ),
+            livetranslate_source_asr_model=get(
+                "LIVETRANSLATE_SOURCE_ASR_MODEL", "qwen3-asr-flash-realtime"
+            ),
+            livetranslate_source_transcription_fallback=get(
+                "LIVETRANSLATE_SOURCE_TRANSCRIPTION_FALLBACK", "none"
+            ).lower(),
+            livetranslate_enable_voice_clone=_as_bool(
+                get("LIVETRANSLATE_ENABLE_VOICE_CLONE", "false"), False
+            ),
+            livetranslate_voice_clone_frequency=get(
+                "LIVETRANSLATE_VOICE_CLONE_FREQUENCY", "once"
+            ).lower(),
+            livetranslate_connect_timeout_seconds=float(
+                get("LIVETRANSLATE_CONNECT_TIMEOUT_SECONDS", "15")
+            ),
+            livetranslate_session_finish_timeout_seconds=float(
+                get("LIVETRANSLATE_SESSION_FINISH_TIMEOUT_SECONDS", "20")
+            ),
+            livetranslate_audio_queue_max_chunks=int(
+                get("LIVETRANSLATE_AUDIO_QUEUE_MAX_CHUNKS", "100")
+            ),
+            livetranslate_hotwords=get_json_map("LIVETRANSLATE_HOTWORDS_JSON"),
         )
         config.validate()
         return config
@@ -176,6 +258,9 @@ class ServerConfig:
             self.stream_turn_queue_max,
             self.stream_tts_text_queue_max,
             self.stream_tts_audio_queue_max_chunks,
+            self.livetranslate_connect_timeout_seconds,
+            self.livetranslate_session_finish_timeout_seconds,
+            self.livetranslate_audio_queue_max_chunks,
         )
         if any(value <= 0 for value in positive_stream_values):
             raise ValueError("流式容量和超时配置必须大于 0。")
@@ -199,6 +284,34 @@ class ServerConfig:
             <= self.tts_text_max_chars
         ):
             raise ValueError("TTS 文本分段字符阈值顺序无效。")
+        if self.livetranslate_output_modalities not in {("text",), ("text", "audio")}:
+            raise ValueError(
+                "LIVETRANSLATE_OUTPUT_MODALITIES 必须是 text 或 text,audio。"
+            )
+        if (
+            self.livetranslate_source_language != "zh"
+            or self.livetranslate_target_language != "en"
+        ):
+            raise ValueError("当前 LiveTranslate 仅支持配置为中文到英文。")
+        if self.livetranslate_source_transcription_fallback != "none":
+            raise ValueError("本轮 LIVETRANSLATE_SOURCE_TRANSCRIPTION_FALLBACK 必须是 none。")
+        if self.livetranslate_voice_clone_frequency != "once":
+            raise ValueError("本轮声音复刻频率仅允许 once。")
+        if self.livetranslate_enable_voice_clone and self.livetranslate_voice != "default":
+            raise ValueError("启用 once 声音复刻时 LIVETRANSLATE_VOICE 必须是 default。")
+
+    @property
+    def stream_provider_configuration_error(self) -> str | None:
+        if self.stream_pipeline_provider not in {"livetranslate", "modular"}:
+            return "STREAM_PIPELINE_PROVIDER 必须是 livetranslate 或 modular。"
+        if self.stream_pipeline_fallback_provider not in {"modular", "none"}:
+            return "STREAM_PIPELINE_FALLBACK_PROVIDER 必须是 modular 或 none。"
+        if (
+            self.stream_pipeline_provider == "modular"
+            and self.stream_pipeline_fallback_provider == "modular"
+        ):
+            return None
+        return None
 
     def provider_config(self, *, asr_model: str | None = None) -> AppConfig:
         return AppConfig(

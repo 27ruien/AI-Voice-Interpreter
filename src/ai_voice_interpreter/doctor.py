@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import importlib
 import os
+import socket
+import ssl
 import sys
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from urllib.parse import urlsplit
+
+import certifi
+import httpx
 
 from .config import AppConfig
 
@@ -42,6 +48,15 @@ class DoctorReport:
     ready_for_real_mode: bool
 
 
+@dataclass(frozen=True, slots=True)
+class GatewayProbeResult:
+    reachable: bool
+    tls_ok: bool
+    provider_available: bool
+    default_pipeline: str
+    message: str
+
+
 def collect_checks(
     *,
     config_loader: Callable[[], AppConfig] | None = None,
@@ -51,6 +66,7 @@ def collect_checks(
     microphone_probe: Callable[[], tuple[bool, str]] | None = None,
     afplay_path: Path = Path("/usr/bin/afplay"),
     temp_directory: Path | None = None,
+    gateway_probe: Callable[[AppConfig], GatewayProbeResult] | None = None,
 ) -> DoctorReport:
     """Inspect local readiness without making any model or network request."""
     checks: list[DoctorCheck] = []
@@ -59,6 +75,7 @@ def collect_checks(
     importer = package_importer or importlib.import_module
     probe_microphone = microphone_probe or _probe_microphone
     load_config = config_loader or AppConfig.load
+    probe_gateway = gateway_probe or _probe_gateway
 
     supported_python = (3, 11) <= version[:2] < (3, 15)
     checks.append(
@@ -121,6 +138,38 @@ def collect_checks(
             processing_configured = gateway_url and gateway_token
             checks.append(
                 DoctorCheck(CheckLevel.PASS, "INTERPRETER_MODE", config.interpreter_mode)
+            )
+            gateway = probe_gateway(config)
+            checks.append(
+                DoctorCheck(
+                    CheckLevel.PASS if gateway.reachable else CheckLevel.FAIL,
+                    "Gateway reachable",
+                    gateway.message,
+                )
+            )
+            checks.append(
+                DoctorCheck(
+                    CheckLevel.PASS if gateway.provider_available else CheckLevel.FAIL,
+                    "Streaming Provider available",
+                    "可用" if gateway.provider_available else "不可用",
+                )
+            )
+            checks.append(
+                DoctorCheck(
+                    CheckLevel.PASS if gateway.default_pipeline else CheckLevel.FAIL,
+                    "Default pipeline",
+                    gateway.default_pipeline or "未返回",
+                )
+            )
+            checks.append(
+                DoctorCheck(CheckLevel.PASS, "Voice mode", config.stream_voice_mode)
+            )
+            checks.append(
+                DoctorCheck(
+                    CheckLevel.PASS if gateway.tls_ok else CheckLevel.FAIL,
+                    "WSS TLS",
+                    "证书验证通过" if gateway.tls_ok else "证书验证失败",
+                )
             )
             checks.append(
                 DoctorCheck(
@@ -245,6 +294,56 @@ def _check_temp_directory(directory: Path | None) -> tuple[bool, str]:
         return True, "可写"
     except Exception as exc:
         return False, f"不可写：{exc}"
+
+
+def _probe_gateway(config: AppConfig) -> GatewayProbeResult:
+    """Check public readiness and TLS only; never authenticates or calls a model."""
+    try:
+        response = httpx.get(
+            f"{config.ai_gateway_base_url.rstrip('/')}/readyz",
+            timeout=min(10.0, config.network_timeout_seconds),
+            follow_redirects=False,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        streaming = payload.get("streaming")
+        details = streaming if isinstance(streaming, dict) else {}
+        provider = str(details.get("configured_stream_provider", ""))
+        enabled = bool(details.get("enabled"))
+        if enabled and not provider:
+            provider = "modular (legacy readyz)"
+        available = enabled and provider in {
+            "livetranslate",
+            "modular",
+            "modular (legacy readyz)",
+        }
+    except Exception as exc:
+        return GatewayProbeResult(False, False, False, "", f"访问失败：{type(exc).__name__}")
+    parsed = urlsplit(config.ai_gateway_base_url)
+    tls_ok = False
+    if parsed.scheme == "https" and parsed.hostname:
+        context = ssl.create_default_context(cafile=certifi.where())
+        port = parsed.port or 443
+        try:
+            with (
+                socket.create_connection(
+                    (parsed.hostname, port),
+                    timeout=min(10.0, config.network_timeout_seconds),
+                ) as raw,
+                context.wrap_socket(raw, server_hostname=parsed.hostname),
+            ):
+                tls_ok = True
+        except Exception:
+            tls_ok = False
+    elif parsed.scheme == "http":
+        tls_ok = False
+    return GatewayProbeResult(
+        True,
+        tls_ok,
+        available,
+        provider,
+        f"{response.status_code} readyz",
+    )
 
 
 def format_report(report: DoctorReport) -> str:

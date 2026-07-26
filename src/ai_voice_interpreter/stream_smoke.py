@@ -58,6 +58,19 @@ class SmokeReport:
     error_code: str = ""
     error: str = ""
     output_audio_paths: list[str] = field(default_factory=list)
+    pipeline_provider: str = ""
+    upstream_model: str = ""
+    upstream_session_id: str = ""
+    upstream_response_ids: list[str] = field(default_factory=list)
+    last_event_id: str = ""
+    source_transcription_unavailable: bool = False
+    voice_clone_status: str = ""
+    usage: dict[str, Any] = field(default_factory=dict)
+    first_source_transcript_ms: float = 0.0
+    first_translation_ms: float = 0.0
+    first_audio_ms: float = 0.0
+    speech_end_to_first_playback_ms: float = 0.0
+    session_total_ms: float = 0.0
 
 
 class StreamingSmokeRunner:
@@ -67,9 +80,13 @@ class StreamingSmokeRunner:
         *,
         play: bool = False,
         keep_files: bool = False,
+        pipeline_provider: str | None = None,
+        source_transcription_enabled: bool = True,
     ) -> None:
         self.config = config
         self.keep_files = keep_files
+        self.pipeline_provider = pipeline_provider
+        self.source_transcription_enabled = source_transcription_enabled
         output_factory = None if play else lambda **_kwargs: _NullOutput()
         self.player = PCMStreamingPlayer(
             prebuffer_ms=config.stream_playback_prebuffer_ms,
@@ -88,6 +105,7 @@ class StreamingSmokeRunner:
         self._speech_started_at = 0.0
         self._speech_ended_at = 0.0
         self._microphone: StreamingMicrophone | None = None
+        self._session_started_at = 0.0
 
     def run_file(self, audio_path: Path) -> SmokeReport:
         with wave.open(str(audio_path), "rb") as source:
@@ -102,7 +120,11 @@ class StreamingSmokeRunner:
                 target_language=self.config.target_language,
                 voice=self.config.effective_tts_voice,
                 chunk_ms=self.config.stream_audio_chunk_ms,
+                voice_mode=self.config.stream_voice_mode,
+                pipeline_provider=self.pipeline_provider,
+                source_transcription_enabled=self.source_transcription_enabled,
             )
+            self._record_started(started)
             self.report.session_id = str(started["session_id"])
             receiver = threading.Thread(target=self._receive_loop, daemon=True)
             receiver.start()
@@ -112,6 +134,7 @@ class StreamingSmokeRunner:
                 self._send_audio_or_raise(chunk, receiver)
                 deadline += self.config.stream_audio_chunk_ms / 1000
                 time.sleep(max(0.0, deadline - time.monotonic()))
+            self._speech_ended_at = time.monotonic()
             for _ in range(max(1, 1000 // self.config.stream_audio_chunk_ms)):
                 self._send_audio_or_raise(b"\0\0" * frames, receiver)
                 deadline += self.config.stream_audio_chunk_ms / 1000
@@ -122,7 +145,7 @@ class StreamingSmokeRunner:
                 raise GatewayError("流式 Smoke 等待服务结束超时。")
             if self._receiver_error is not None:
                 raise self._receiver_error
-            self.report.success = self._completed.is_set() and self.report.asr_final_count > 0
+            self.report.success = self._successful_output()
             if not self.report.success:
                 raise GatewayError("流式 Smoke 未产生完整 Turn。")
             return self.report
@@ -139,7 +162,11 @@ class StreamingSmokeRunner:
             target_language=self.config.target_language,
             voice=self.config.effective_tts_voice,
             chunk_ms=self.config.stream_audio_chunk_ms,
+            voice_mode=self.config.stream_voice_mode,
+            pipeline_provider=self.pipeline_provider,
+            source_transcription_enabled=self.source_transcription_enabled,
         )
+        self._record_started(started)
         self.report.session_id = str(started["session_id"])
         receiver = threading.Thread(target=self._receive_loop, daemon=True)
         microphone.start()
@@ -163,7 +190,7 @@ class StreamingSmokeRunner:
             microphone.stop()
         if self._receiver_error is not None:
             raise self._receiver_error
-        self.report.success = self._completed.is_set() and self.report.asr_final_count > 0
+        self.report.success = self._successful_output()
         return self.report
 
     def close(self) -> None:
@@ -202,19 +229,29 @@ class StreamingSmokeRunner:
         assert packet.event is not None
         event = packet.event
         event_type = event["type"]
-        if event_type == "vad.speech_start":
+        if event_type == "session.started":
+            self._record_started(event)
+        elif event_type == "vad.speech_start":
             self._speech_started_at = now - float(event.get("speech_ms", 0)) / 1000
             self.report.turn_ids.append(str(event["turn_id"]))
         elif event_type == "vad.speech_end":
             self._speech_ended_at = now - float(event.get("silence_ms", 0)) / 1000
         elif event_type == "asr.partial":
             self.report.asr_partial_count += 1
+            if self.report.first_source_transcript_ms == 0 and self._speech_ended_at:
+                self.report.first_source_transcript_ms = max(
+                    0.0, (now - self._speech_ended_at) * 1000
+                )
         elif event_type == "asr.final":
             self.report.asr_final_count += 1
             self.report.asr_final = str(event.get("text", ""))
             self.report.final_text_lengths["asr"] = len(self.report.asr_final)
         elif event_type == "translation.partial":
             self.report.translation_partial_count += 1
+            if self.report.first_translation_ms == 0 and self._speech_ended_at:
+                self.report.first_translation_ms = max(
+                    0.0, (now - self._speech_ended_at) * 1000
+                )
         elif event_type == "translation.final":
             self.report.translation_final_count += 1
             self.report.translation_final = str(event.get("text", ""))
@@ -222,6 +259,10 @@ class StreamingSmokeRunner:
                 self.report.translation_final
             )
         elif event_type == "tts.audio.start":
+            if self.report.first_audio_ms == 0 and self._speech_ended_at:
+                self.report.first_audio_ms = max(
+                    0.0, (now - self._speech_ended_at) * 1000
+                )
             if (
                 self.config.stream_capture_mode == "safe"
                 and self._microphone is not None
@@ -262,16 +303,70 @@ class StreamingSmokeRunner:
                 self.report.client_first_playback_ms = (
                     self.player.first_playback_at - self._speech_ended_at
                 ) * 1000
+                self.report.speech_end_to_first_playback_ms = (
+                    self.report.client_first_playback_ms
+                )
             if self.player.first_playback_at and self._speech_started_at:
                 self.report.end_to_end_ttfa_ms = (
                     self.player.first_playback_at - self._speech_started_at
                 ) * 1000
+            response_id = str(event.get("upstream_response_id", ""))
+            if response_id and response_id not in self.report.upstream_response_ids:
+                self.report.upstream_response_ids.append(response_id)
+            usage = event.get("usage")
+            if isinstance(usage, dict):
+                self.report.usage = usage
+            self.report.last_event_id = str(event.get("event_id", ""))
+        elif event_type == "usage.updated":
+            usage = event.get("usage")
+            if isinstance(usage, dict):
+                self.report.usage = usage
+        elif event_type == "source_transcription.unavailable":
+            self.report.source_transcription_unavailable = True
+        elif event_type == "voice_clone.status":
+            self.report.voice_clone_status = str(event.get("status", ""))
         elif event_type == "session.completed":
             peaks = event.get("queue_peaks", {})
             if isinstance(peaks, dict):
                 self.report.queue_peaks = {str(key): int(value) for key, value in peaks.items()}
             self.report.queue_peaks["playback"] = self.player.peak_queue_depth
+            self.report.upstream_session_id = str(
+                event.get("upstream_session_id", self.report.upstream_session_id)
+            )
+            self.report.last_event_id = str(
+                event.get("last_event_id", self.report.last_event_id)
+            )
+            if self._session_started_at:
+                self.report.session_total_ms = (now - self._session_started_at) * 1000
             self._completed.set()
+
+    def _record_started(self, event: dict[str, Any]) -> None:
+        if not self._session_started_at:
+            self._session_started_at = time.monotonic()
+        self.report.session_id = str(event.get("session_id", self.report.session_id))
+        self.report.pipeline_provider = str(
+            event.get("pipeline_provider", self.report.pipeline_provider)
+        )
+        self.report.upstream_model = str(
+            event.get("upstream_model", self.report.upstream_model)
+        )
+        self.report.upstream_session_id = str(
+            event.get("upstream_session_id", self.report.upstream_session_id)
+        )
+
+    def _successful_output(self) -> bool:
+        source_ok = (
+            self.report.asr_final_count > 0
+            or self.report.source_transcription_unavailable
+            or not self.source_transcription_enabled
+        )
+        return (
+            self._completed.is_set()
+            and source_ok
+            and self.report.translation_final_count > 0
+            and self.report.tts_audio_chunks > 0
+            and self.report.tts_audio_bytes > 0
+        )
 
 
 def _parser() -> argparse.ArgumentParser:

@@ -37,6 +37,18 @@ def test_valid_session_start_round_trips() -> None:
     assert parsed.to_message()["type"] == "session.start"
 
 
+def test_session_start_round_trips_voice_mode_and_internal_provider_override() -> None:
+    payload = valid_start()
+    payload["voice_mode"] = "clone_once"
+    payload["pipeline_provider"] = "modular"
+    payload["source_transcription_enabled"] = False
+    parsed = SessionStart.parse(payload)
+    rendered = parsed.to_message()
+    assert rendered["voice_mode"] == "clone_once"
+    assert rendered["pipeline_provider"] == "modular"
+    assert rendered["source_transcription_enabled"] is False
+
+
 @pytest.mark.parametrize(
     ("change", "code"),
     [

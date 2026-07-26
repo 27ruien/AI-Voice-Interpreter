@@ -99,3 +99,12 @@ def test_nondefault_tts_model_requires_explicit_compatible_voice() -> None:
     config = AppConfig(app_mode="mock", tts_model="cosyvoice-v2")
     with pytest.raises(ConfigurationError, match="TTS_VOICE"):
         config.validate_basic()
+
+
+def test_stream_voice_mode_supports_standard_and_clone_once() -> None:
+    assert AppConfig(app_mode="mock", stream_voice_mode="standard").stream_voice_mode == (
+        "standard"
+    )
+    AppConfig(app_mode="mock", stream_voice_mode="clone_once").validate_basic()
+    with pytest.raises(ConfigurationError, match="STREAM_VOICE_MODE"):
+        AppConfig(app_mode="mock", stream_voice_mode="always").validate_basic()

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Annotated, Any
@@ -21,10 +21,11 @@ from .auth import BearerTokenAuth
 from .config import ServerConfig
 from .errors import GatewayHTTPError
 from .pipeline import build_server_pipeline, generated_audio_size
+from .providers.livetranslate import LiveTranslateSessionOptions, LiveTranslateUpstreamSession
+from .streaming.router import RoutedStreamingSession, StreamingPipelineRouter
 from .streaming.session import (
     StreamDependencies,
     StreamingConnectionRegistry,
-    StreamingSession,
     bearer_token_from_header,
 )
 
@@ -53,6 +54,9 @@ def create_app(
     *,
     pipeline: InterpreterPipeline | Any | None = None,
     stream_dependencies: StreamDependencies | None = None,
+    livetranslate_upstream_factory: Callable[
+        [ServerConfig, LiveTranslateSessionOptions], LiveTranslateUpstreamSession
+    ] = LiveTranslateUpstreamSession,
 ) -> FastAPI:
     settings = config or ServerConfig.load()
     configure_logging(settings.log_level)
@@ -61,6 +65,11 @@ def create_app(
     auth = BearerTokenAuth(settings.client_test_token)
     gate = ConcurrencyGate(settings.max_concurrent_requests)
     streaming = stream_dependencies or StreamDependencies.real(settings)
+    stream_router = StreamingPipelineRouter(
+        settings,
+        streaming,
+        upstream_factory=livetranslate_upstream_factory,
+    )
     stream_registry = StreamingConnectionRegistry(
         settings.streaming_max_connections,
         settings.streaming_max_connections_per_token,
@@ -87,6 +96,7 @@ def create_app(
     app.state.pipeline = processor
     app.state.gate = gate
     app.state.stream_registry = stream_registry
+    app.state.stream_router = stream_router
 
     @app.middleware("http")
     async def request_context(request: Request, call_next: Any) -> Any:
@@ -121,6 +131,11 @@ def create_app(
         writable = _directory_writable(settings.temp_audio_dir)
         if not writable:
             raise GatewayHTTPError(503, "not_ready", "临时音频目录不可写。")
+        provider_configuration_error = settings.stream_provider_configuration_error
+        if provider_configuration_error:
+            raise GatewayHTTPError(
+                503, "stream_provider_configuration_error", provider_configuration_error
+            )
         return {
             "status": "ready",
             "configuration": "loaded",
@@ -131,6 +146,17 @@ def create_app(
                 "enabled": settings.streaming_enabled,
                 "protocol_version": settings.streaming_protocol_version,
                 "active_sessions": stream_registry.active,
+                "active_upstream_connections": (
+                    LiveTranslateUpstreamSession.active_connections
+                ),
+                "configured_stream_provider": settings.stream_pipeline_provider,
+                "fallback_provider": settings.stream_pipeline_fallback_provider,
+                "livetranslate_model_configured": bool(settings.livetranslate_model),
+                "workspace_configured": bool(settings.dashscope_workspace_id),
+                "voice_clone_enabled": settings.livetranslate_enable_voice_clone,
+                "source_transcription_enabled": (
+                    settings.livetranslate_enable_source_transcription
+                ),
             },
         }
 
@@ -149,7 +175,7 @@ def create_app(
             await websocket.close(code=4429, reason="Streaming session limit reached")
             return
         await websocket.accept()
-        session = StreamingSession(websocket, settings, streaming)
+        session = RoutedStreamingSession(websocket, settings, stream_router)
         try:
             await asyncio.wait_for(
                 session.run(), timeout=settings.streaming_max_session_seconds

@@ -61,6 +61,9 @@ class StreamingGatewayClient:
         target_language: str = "en",
         voice: str | None = None,
         chunk_ms: int = 100,
+        voice_mode: str = "standard",
+        pipeline_provider: str | None = None,
+        source_transcription_enabled: bool = True,
     ) -> dict[str, Any]:
         if self._connection is not None:
             raise GatewayError("流式连接已经打开。")
@@ -74,6 +77,9 @@ class StreamingGatewayClient:
             audio=AudioInputSpec("pcm_s16le", 16000, 1, chunk_ms),
             client_platform=f"macos-{platform.machine()}",
             app_version=__version__,
+            pipeline_provider=pipeline_provider,
+            voice_mode=voice_mode,
+            source_transcription_enabled=source_transcription_enabled,
             protocol_version=PROTOCOL_VERSION,
         )
         try:

@@ -62,7 +62,7 @@ class MainWindow(QMainWindow):
 
         title = QLabel("AI Voice Interpreter")
         title.setFont(QFont("", 24, QFont.Weight.Bold))
-        subtitle = QLabel("Turn-based Streaming 语音翻译 MVP · 中文 → English")
+        subtitle = QLabel("实时语音翻译 MVP · 中文 → English")
         subtitle.setStyleSheet("color: #64748b; font-size: 14px;")
         layout.addWidget(title)
         layout.addWidget(subtitle)
@@ -107,6 +107,14 @@ class MainWindow(QMainWindow):
             self.capture_combo.findData(self.config.stream_capture_mode)
         )
         mode_row.addWidget(self.capture_combo)
+        mode_row.addWidget(QLabel("输出音色"))
+        self.voice_combo = QComboBox()
+        self.voice_combo.addItem("标准音色", "standard")
+        self.voice_combo.addItem("模仿我的音色（实验）", "clone_once")
+        self.voice_combo.setCurrentIndex(
+            self.voice_combo.findData(self.config.stream_voice_mode)
+        )
+        mode_row.addWidget(self.voice_combo)
         mode_row.addStretch()
         layout.addLayout(mode_row)
 
@@ -129,6 +137,7 @@ class MainWindow(QMainWindow):
                 ("vad", "VAD"),
                 ("turn", "Turn"),
                 ("fallback", "Fallback"),
+                ("provider", "Pipeline"),
             )
         ):
             stream_status.addWidget(QLabel(title_text), 0, index)
@@ -300,6 +309,7 @@ class MainWindow(QMainWindow):
                 self.config,
                 interpreter_mode="remote_stream",
                 stream_capture_mode=str(self.capture_combo.currentData()),
+                stream_voice_mode=str(self.voice_combo.currentData()),
             )
             stream_config.validate_for_processing()
             self.player.stop()
@@ -311,6 +321,10 @@ class MainWindow(QMainWindow):
             self.stream_labels["connection"].setText("连接中")
             self.stream_labels["microphone"].setText("等待启动")
             self.status_label.setText("正在建立流式连接")
+            if stream_config.stream_voice_mode == "clone_once":
+                self.error_text.setPlainText(
+                    "实验音色只可用于本人或已获授权的声音；会话开始阶段可能先使用默认音色过渡。"
+                )
             self.start_button.setEnabled(False)
             self.stop_button.setEnabled(True)
             self.replay_button.setEnabled(False)
@@ -328,7 +342,14 @@ class MainWindow(QMainWindow):
         if event_type == "session.started":
             self.stream_labels["connection"].setText("已连接")
             self.stream_labels["microphone"].setText("Listening")
+            provider = str(event.get("pipeline_provider", ""))
+            self.stream_labels["provider"].setText(
+                "实时翻译（推荐）" if provider == "livetranslate" else "模块化回退"
+            )
             self.status_label.setText("Listening")
+        elif event_type == "provider.changed":
+            self.stream_labels["provider"].setText("模块化回退")
+            self.stream_labels["fallback"].setText("模块化回退")
         elif event_type == "vad.speech_start":
             self.stream_labels["vad"].setText("Speech Detected")
             self.stream_labels["turn"].setText("采集中")
@@ -361,6 +382,10 @@ class MainWindow(QMainWindow):
             if event.get("code") == "FALLBACK_REQUIRED":
                 self.stream_labels["fallback"].setText("HTTP Fallback")
             self.error_text.setPlainText(str(event.get("message", "")))
+        elif event_type == "source_transcription.unavailable":
+            self.error_text.setPlainText("源语言字幕暂不可用，翻译与音频将继续。")
+        elif event_type == "voice_clone.status" and event.get("status") == "failed":
+            self.error_text.setPlainText("声音复刻失败，请切换为标准音色。")
         elif event_type == "session.completed":
             self.stream_labels["connection"].setText("已断开")
 
@@ -410,6 +435,7 @@ class MainWindow(QMainWindow):
     def _mode_changed(self) -> None:
         streaming = self.mode_combo.currentData() == "remote_stream"
         self.capture_combo.setEnabled(streaming)
+        self.voice_combo.setEnabled(streaming)
         self.start_button.setText("开始同传" if streaming else "开始录音")
         self.stop_button.setText("停止同传" if streaming else "停止并翻译")
 

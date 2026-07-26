@@ -29,5 +29,7 @@ screenshots/
 .ai-voice-interpreter/
 remote-smoke-output/
 stream-smoke-output/
+livetranslate-smoke-output/
 benchmark-output/
+pipeline-benchmark-output/
 soak-output/

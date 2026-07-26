@@ -132,6 +132,9 @@ class StreamingSession:
         websocket: WebSocket,
         config: ServerConfig,
         dependencies: StreamDependencies,
+        *,
+        start_message: SessionStart | None = None,
+        fallback_from: str | None = None,
     ) -> None:
         self.websocket = websocket
         self.config = config
@@ -141,7 +144,8 @@ class StreamingSession:
         self.state = SessionState.CONNECTED
         self.started_at = time.monotonic()
         self.last_client_message_at = self.started_at
-        self.start_message: SessionStart | None = None
+        self.start_message: SessionStart | None = start_message
+        self.fallback_from = fallback_from
         self.metrics = SessionMetrics()
         self.input_queue: asyncio.Queue[bytes | None] = asyncio.Queue(
             config.stream_audio_queue_max_chunks
@@ -164,20 +168,26 @@ class StreamingSession:
     async def run(self) -> None:
         try:
             try:
-                first = await asyncio.wait_for(
-                    self.websocket.receive(),
-                    timeout=self.config.streaming_heartbeat_timeout_seconds,
+                first = (
+                    None
+                    if self.start_message is not None
+                    else await asyncio.wait_for(
+                        self.websocket.receive(),
+                        timeout=self.config.streaming_heartbeat_timeout_seconds,
+                    )
                 )
             except TimeoutError as exc:
                 raise ProtocolError(
                     ErrorCode.HEARTBEAT_TIMEOUT, "等待 session.start 超时。"
                 ) from exc
-            if first.get("text") is None:
-                raise ProtocolError(
-                    ErrorCode.INVALID_SESSION_START,
-                    "发送音频前必须先发送 session.start。",
-                )
-            self.start_message = SessionStart.parse(first["text"])
+            if self.start_message is None:
+                assert first is not None
+                if first.get("text") is None:
+                    raise ProtocolError(
+                        ErrorCode.INVALID_SESSION_START,
+                        "发送音频前必须先发送 session.start。",
+                    )
+                self.start_message = SessionStart.parse(first["text"])
             if self.start_message.audio.chunk_ms != self.config.stream_audio_chunk_ms:
                 raise ProtocolError(
                     ErrorCode.INVALID_AUDIO_FORMAT,
@@ -197,6 +207,9 @@ class StreamingSession:
                     "session_id": self.session_id,
                     "request_id": self.request_id,
                     "protocol_version": self.config.streaming_protocol_version,
+                    "pipeline_provider": "modular",
+                    "upstream_model": self.config.stream_asr_model,
+                    "fallback_from": self.fallback_from,
                     "audio_output": {
                         "format": "pcm_s16le",
                         "sample_rate": 24000,
@@ -205,6 +218,17 @@ class StreamingSession:
                     },
                 }
             )
+            if self.fallback_from:
+                self.metrics.fallback_count += 1
+                await self._send_json(
+                    {
+                        "type": "provider.changed",
+                        "session_id": self.session_id,
+                        "from": self.fallback_from,
+                        "to": "modular",
+                        "reason": "primary_provider_startup_failed",
+                    }
+                )
             async with asyncio.TaskGroup() as tasks:
                 receiver = tasks.create_task(self._receive_loop())
                 audio = tasks.create_task(self._audio_loop())

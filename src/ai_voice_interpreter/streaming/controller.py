@@ -97,6 +97,7 @@ class StreamingSessionController:
                 target_language=self.config.target_language,
                 voice=self.config.effective_tts_voice,
                 chunk_ms=self.config.stream_audio_chunk_ms,
+                voice_mode=self.config.stream_voice_mode,
             )
             stream_opened = True
             self._on_event(started)

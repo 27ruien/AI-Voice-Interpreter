@@ -35,6 +35,7 @@ def build_mock_app(temp_dir: Path) -> FastAPI:
         vad_min_speech_ms=60,
         vad_silence_ms=60,
         vad_pre_roll_ms=20,
+        stream_pipeline_provider="modular",
     )
     dependencies = StreamDependencies(
         asr_factory=MockRealtimeASRSession,
@@ -61,7 +62,7 @@ def run_mock_turn(client: TestClient) -> dict[str, Any]:
         voice=None,
         audio=AudioInputSpec("pcm_s16le", 16000, 1, 100),
         client_platform="mock-harness",
-        app_version="0.2.0",
+        app_version="0.3.0",
     )
     events: list[dict[str, Any]] = []
     audio_bytes = 0

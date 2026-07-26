@@ -30,6 +30,14 @@ class ErrorCode(StrEnum):
     TTS_AUDIO_INVALID = "TTS_AUDIO_INVALID"
     PLAYBACK_FAILED = "PLAYBACK_FAILED"
     FALLBACK_REQUIRED = "FALLBACK_REQUIRED"
+    PIPELINE_CONFIGURATION_INVALID = "PIPELINE_CONFIGURATION_INVALID"
+    PIPELINE_OVERRIDE_DISABLED = "PIPELINE_OVERRIDE_DISABLED"
+    LIVETRANSLATE_CONNECTION_FAILED = "LIVETRANSLATE_CONNECTION_FAILED"
+    LIVETRANSLATE_STREAM_FAILED = "LIVETRANSLATE_STREAM_FAILED"
+    LIVETRANSLATE_FINISH_TIMEOUT = "LIVETRANSLATE_FINISH_TIMEOUT"
+    LIVETRANSLATE_AUDIO_INVALID = "LIVETRANSLATE_AUDIO_INVALID"
+    SOURCE_TRANSCRIPTION_UNAVAILABLE = "SOURCE_TRANSCRIPTION_UNAVAILABLE"
+    VOICE_CLONE_FAILED = "VOICE_CLONE_FAILED"
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
 
@@ -58,6 +66,9 @@ class SessionStart:
     audio: AudioInputSpec
     client_platform: str
     app_version: str
+    pipeline_provider: str | None = None
+    voice_mode: str = "standard"
+    source_transcription_enabled: bool = True
     protocol_version: str = PROTOCOL_VERSION
 
     @classmethod
@@ -93,6 +104,15 @@ class SessionStart:
                 audio=spec,
                 client_platform=str(client["platform"]),
                 app_version=str(client["app_version"]),
+                pipeline_provider=(
+                    str(data["pipeline_provider"]).lower()
+                    if data.get("pipeline_provider")
+                    else None
+                ),
+                voice_mode=str(data.get("voice_mode", "standard")).lower(),
+                source_transcription_enabled=bool(
+                    data.get("source_transcription_enabled", True)
+                ),
                 protocol_version=version,
             )
         except (KeyError, TypeError, ValueError) as exc:
@@ -107,6 +127,16 @@ class SessionStart:
             raise ProtocolError(ErrorCode.INVALID_SESSION_START, "当前仅支持中文到英文。")
         if self.mode != "turn_stream":
             raise ProtocolError(ErrorCode.INVALID_SESSION_START, "mode 必须是 turn_stream。")
+        if self.pipeline_provider not in {None, "livetranslate", "modular"}:
+            raise ProtocolError(
+                ErrorCode.INVALID_SESSION_START,
+                "pipeline_provider 必须是 livetranslate 或 modular。",
+            )
+        if self.voice_mode not in {"standard", "clone_once"}:
+            raise ProtocolError(
+                ErrorCode.INVALID_SESSION_START,
+                "voice_mode 必须是 standard 或 clone_once。",
+            )
         if (
             self.audio.format != "pcm_s16le"
             or self.audio.sample_rate != 16000
@@ -119,7 +149,7 @@ class SessionStart:
             )
 
     def to_message(self) -> dict[str, Any]:
-        return {
+        message: dict[str, Any] = {
             "type": "session.start",
             "protocol_version": self.protocol_version,
             "request_id": self.request_id,
@@ -127,6 +157,8 @@ class SessionStart:
             "target_language": self.target_language,
             "mode": self.mode,
             "voice": self.voice,
+            "voice_mode": self.voice_mode,
+            "source_transcription_enabled": self.source_transcription_enabled,
             "audio": {
                 "format": self.audio.format,
                 "sample_rate": self.audio.sample_rate,
@@ -138,6 +170,9 @@ class SessionStart:
                 "app_version": self.app_version,
             },
         }
+        if self.pipeline_provider:
+            message["pipeline_provider"] = self.pipeline_provider
+        return message
 
 
 def parse_control_message(payload: str) -> dict[str, Any]:

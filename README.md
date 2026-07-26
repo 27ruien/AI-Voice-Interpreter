@@ -1,41 +1,46 @@
 # AI Voice Interpreter
 
-AI Voice Interpreter 是面向 macOS 的单向中文到英文语音翻译 MVP。产品默认使用 Turn-based Streaming：Mac 将麦克风的 16 kHz 单声道 PCM 按 100 ms 分块，经 WSS 发送到 Gateway；服务器通过 WebRTC VAD 划分 Turn，依次调用 Paraformer 实时识别、Qwen-MT 增量翻译和 CosyVoice 双向流式合成；Mac 接收 24 kHz PCM 后边收边播。
+AI Voice Interpreter 是面向 macOS 的单向中文到英文实时语音翻译 MVP。默认链路由服务器连接 Qwen3.5 LiveTranslate：Mac 将 16 kHz 单声道 PCM 按 100 ms 分块发送到 Gateway，模型自动检测语音起止，Gateway 把实时中文字幕、英文翻译和解码后的 Binary PCM 返回 Mac 边收边播。
 
-> 当前版本仍然是单向中文到英文的 Turn-based Streaming，不是双向全双工同声传译。建议使用耳机；当前没有声学回声消除。
+> 当前版本仍是单向中文到英文的实时语音翻译 MVP。LiveTranslate 会自动检测语音起止并输出翻译文本和音频，但当前产品不是双向、全双工会议同传；建议使用耳机，尚未实现声学回声消除。
 
-## 运行模式
+## 当前架构
 
-GUI 保留以下三种可验证模式：
+默认 Streaming Pipeline：
 
-1. **Remote Streaming（产品默认）**：`INTERPRETER_MODE=remote_stream`，音频通过 WSS 分块传输，支持 VAD、多 Turn、Partial 字幕、增量翻译和 PCM 流式播放。
-2. **Remote One-shot**：`INTERPRETER_MODE=remote`，停止录音后通过 HTTPS `/v1/interpret` 上传完整 WAV，下载完整 TTS WAV 后使用 `/usr/bin/afplay` 播放；也是流式失败前尚未播放音频时的稳定回退。
-3. **Mock**：`APP_MODE=mock`，固定文本与本地测试音，不调用任何外部 API。GUI Mock 使用按句链路；流式协议、VAD、多 Turn、播放队列、Benchmark 和 Soak 使用本机 Mock Server 自动验证。
-
-`INTERPRETER_MODE=local` 仅作为开发诊断回退，Mac 会直接调用 DashScope，不是产品默认，也不应用于 Remote 验收。
-
-## Client–Server Streaming 架构
-
-```mermaid
-flowchart LR
-    MIC["Mac 麦克风\n16 kHz PCM"] --> CQ["有界采集 Queue\nRing Buffer"]
-    CQ --> WS["WSS Client\nBearer Header"]
-    WS --> NGINX["Nginx TLS\nWebSocket Upgrade"]
-    NGINX --> API["FastAPI /v1/stream"]
-    API --> VAD["WebRTC VAD\nTurn Coordinator"]
-    VAD --> ASR["Paraformer Realtime\nPartial + Final"]
-    ASR --> MT["Qwen-MT\nIncremental Output"]
-    MT --> SEG["TTS Text Segmenter"]
-    SEG --> TTS["CosyVoice Streaming\n24 kHz PCM"]
-    TTS --> API --> WS
-    WS --> PQ["有界 Playback Queue"] --> OUT["Mac 扬声器/耳机"]
-    CQ -. "流式失败且尚未播放" .-> HTTP["HTTPS /v1/interpret"]
-    HTTP --> AFPLAY["完整 WAV + afplay"]
+```text
+Mac PCM 16 kHz/mono/S16LE
+→ HTTPS/WSS Gateway
+→ qwen3.5-livetranslate-flash-realtime
+→ 源语言字幕 + 英文翻译 + Base64 PCM
+→ Gateway 解码为 Binary PCM
+→ Mac 24 kHz/mono/S16LE 边收边播
 ```
 
-DashScope API Key 只存在受保护的服务器 `server/.env`。Mac Remote 模式只需要 Gateway Token，不需要也不应配置 `DASHSCOPE_API_KEY`。
+模块化回退 Pipeline 保留：
 
-## Mac 安装与配置
+```text
+Mac PCM
+→ Gateway WebRTC VAD
+→ paraformer-realtime-v2
+→ qwen-mt-flash
+→ cosyvoice-v3-flash
+→ Binary PCM
+→ Mac 播放
+```
+
+HTTP One-shot Fallback 保留：
+
+```text
+Mac 完整 WAV → POST /v1/interpret → Paraformer → Qwen-MT → CosyVoice
+→ 下载完整 WAV → /usr/bin/afplay
+```
+
+LiveTranslate 在连接和 `session.update` 尚未成功、也尚未输出音频时，Gateway 最多自动切换一次 modular。已播放任何 LiveTranslate 音频后不会自动切换并重播。其他流式失败仍遵循客户端现有规则：只有尚未播放流式音频时才可使用 HTTP Fallback；已播放部分音频后不会重放完整句子。
+
+DashScope API Key 和 Workspace ID 仅位于服务器 `/srv/ai-voice-interpreter/server/.env`。Mac Remote 模式只保存 Gateway Token，不需要也不应配置 DashScope API Key。
+
+## Mac 安装
 
 要求 macOS、Python 3.11–3.14、麦克风和扬声器。
 
@@ -46,7 +51,7 @@ cp .env.example .env
 make setup
 ```
 
-产品默认配置：
+Mac `.env` 的产品配置：
 
 ```dotenv
 APP_MODE=real
@@ -69,179 +74,210 @@ STREAM_PLAYBACK_QUEUE_MAX_SECONDS=10
 STREAM_PLAYBACK_SAVE_LAST_TURN=true
 STREAM_CAPTURE_MODE=safe
 STREAM_HTTP_FALLBACK=true
+STREAM_VOICE_MODE=standard
 ```
 
-`TTS_VOICE` 为空且 `TTS_MODEL=cosyvoice-v3-flash` 时，代码选择兼容的系统音色 `longanyang`。真实验收使用系统音色，`CLONED_VOICE_ID` 保持为空。
+`STREAM_VOICE_MODE` 允许 `standard` 或 `clone_once`。GUI 对应“标准音色”和“模仿我的音色（实验）”。声音复刻只能用于本人或已获授权的声音；`clone_once` 会在会话开始阶段提取一次音色，完成前可能使用默认音色过渡。用户音频不会因复刻而永久保存。
 
-启动：
+启动前诊断：
 
 ```bash
 make doctor
+```
+
+Doctor 不调用收费模型。它检查 Python、macOS、依赖、配置、麦克风、`afplay`、临时目录、Gateway `/readyz`、默认 Pipeline、Streaming 可用性和 WSS TLS；它只显示 Key/Token 是否配置，不显示具体值。真实 Provider 权限必须使用单独的受控权限探测。
+
+启动 GUI：
+
+```bash
 make run
 ```
 
-Doctor 不发起网络模型请求，不产生费用，也不会显示 Key 或 Token 的值。它检查 Python/macOS、必要包、模式与模型配置、系统音色、Gateway 配置、Remote 模式未保存 DashScope Key、麦克风、`afplay` 和临时目录。
-
-首次使用麦克风时，请在“系统设置 → 隐私与安全性 → 麦克风”允许 Terminal、iTerm 或 Python 访问，随后完全退出并重新启动应用。
-
-### GUI 操作
-
-- 选择“流式模式”后点击“开始同传”，讲话时可看到 ASR Partial；自然停顿后显示 ASR Final、Translation Partial/Final，并开始 PCM 播放。
-- 点击“停止同传”会刷新当前 Turn、等待服务完成并释放连接，可再次开始新 Session。
-- “按句模式”保留原有开始录音、停止并翻译、重新播放操作。
-- GUI 显示连接、麦克风、VAD、Turn、Fallback，以及 First ASR Partial、Turn Finalization、Translation First Token、TTS First Audio、Client First Playback 和 Turn Total。
-
-### Safe Mode 与 Headphones Mode
-
-- **Safe Mode（默认）**：播放 TTS 时暂停麦克风，结束后恢复，降低扬声器回灌造成误触发的风险。
-- **Headphones Mode**：播放期间继续采集，延续性更好，但应佩戴耳机。
-
-当前没有自动声学回声消除。外放时优先使用 Safe Mode；连续采集时强烈建议耳机。
-
-### Mock 与 Local Direct
+Mock GUI：
 
 ```bash
 make mock
 ```
 
-Mock GUI 不调用外部 API。Local Direct 仅供开发：
+Mock 不调用任何外部 API，也不能作为真实服务验收结果。
 
-```dotenv
-APP_MODE=real
-INTERPRETER_MODE=local
-DASHSCOPE_API_KEY=
-DASHSCOPE_REGION=beijing
-DASHSCOPE_WORKSPACE_ID=
-DASHSCOPE_HTTP_BASE_URL=
-DASHSCOPE_WEBSOCKET_BASE_URL=
-```
+首次使用麦克风时，请在“系统设置 → 隐私与安全性 → 麦克风”允许 Terminal、iTerm 或 Python，随后完全退出并重新启动应用。
 
-## WebSocket 协议
+## GUI 操作
 
-公网 WSS 地址由 Gateway 基址推导：
+- “流式模式”默认使用“实时翻译（推荐）”；后端回退时显示“模块化回退”。
+- “标准音色”使用服务器配置的 LiveTranslate 系统音色。
+- “模仿我的音色（实验）”使用 `enable_voice_clone=true`、`voice=default`、`frequency=once`。
+- Source transcription 不可用时显示“源语言字幕暂不可用”，翻译和音频可继续。
+- Safe Mode 默认在播放时暂停麦克风以降低扬声器回灌；Headphones Mode 持续采集并强烈建议佩戴耳机。
+- “停止同传”只在结束整个 Session 时发送 `session.finish`，自然停顿不会结束上游 Session。
+- “按句模式”继续使用 HTTP One-shot。
+
+## Gateway WebSocket 协议
+
+公网地址：
 
 ```text
 https://gridworks.cn/tool/ai-interpreter-api
 → wss://gridworks.cn/tool/ai-interpreter-api/v1/stream
 ```
 
-Token 只放在 `Authorization: Bearer ...` Header，不放在 URL Query、日志或控制消息中。连接后的首条客户端文本消息必须是协议 `1.0` 的 `session.start`，声明 `pcm_s16le`、16 kHz、单声道及分块时长；之后二进制 Frame 是原始 PCM。客户端还可发送 `ping` 和 `session.stop`。
+Token 只放在 `Authorization: Bearer ...` Header，不放在 URL、日志或控制消息中。首条客户端消息是协议 `1.0` 的 `session.start`，随后 Binary Frame 为 16 kHz、单声道、16-bit little-endian PCM。客户端发送 `session.stop` 后，Gateway 在 LiveTranslate 模式发送上游 `session.finish` 并等待 `session.finished`。
 
-服务端控制事件包括：
+兼容事件：
 
 - `session.started` / `session.completed`
 - `vad.speech_start` / `vad.speech_end`
 - `asr.partial` / `asr.final`
 - `translation.partial` / `translation.final`
-- `tts.audio.start` / 二进制 PCM / `tts.audio.end`
-- `turn.completed`、`warning`、`error`、`pong`
+- `tts.audio.start` / Binary PCM / `tts.audio.end`
+- `turn.completed` / `warning` / `error` / `pong`
 
-ASR Partial 只用于实时字幕，可能随 Provider 修订；只有一次 `asr.final` 会成为稳定 Source Turn。Qwen-MT 对稳定 Source Turn 调用一次，增量 Delta 经归一化后显示并送入 TTS Text Segmenter，避免重复翻译和重复合成。TTS 二进制块严格位于对应的 `tts.audio.start` 与 `tts.audio.end` 之间。
+新增但向后兼容的事件：
 
-## VAD 与 Turn
+- `provider.started` / `provider.changed`
+- `source_transcription.unavailable`
+- `voice_clone.status`
+- `usage.updated`
 
-服务器把客户端 100 ms Chunk 拆成 WebRTC VAD 支持的 20 ms Frame。默认参数：最短语音 250 ms、静音结束阈值 650 ms、Pre-roll 200 ms、单 Turn 最长 15 秒。Pre-roll 减少首字截断；自然停顿或最长时限结束 Turn；`session.stop` 会 Flush 正在进行的 Turn。
+`session.started` 返回 `pipeline_provider`、不敏感的上游模型名、上游 Session ID、Voice Mode 和由 `session.updated.output_audio_format` 得出的播放参数。Provider Request ID 不可获得时不会伪造；LiveTranslate 使用真实的 upstream session/response/item/event ID。
 
-所有高频链路使用有界 Queue，包括采集、服务器输入、ASR 事件、翻译事件、TTS 文本、TTS 音频、播放和 Turn Queue。达到 80% 会记录 Warning，队列满会显式结束当前会话，不会无限等待或无限增长。
+LiveTranslate 的 `text` 是已确认内容，`stash` 是可修订预测。Gateway 会覆盖预测、去除重复事件，并只发送一次 Final。`response.audio.delta` 的 Base64 音频在服务器校验并解码后才以 Binary PCM 下发；Base64 不会进入 Mac 协议或日志。
 
-## Streaming TTS 与 PCM 播放
+## 服务器配置
 
-Qwen-MT 的增量英文按标点、目标长度、最大长度切段。CosyVoice 使用 `streaming_call()` 与 `streaming_complete()`，返回 24 kHz、单声道、16-bit PCM。Mac 在独立播放线程中预缓冲约 150 ms 后写入 SoundDevice RawOutputStream；网络回调和 GUI 主线程都不直接执行音频设备 I/O。最后一轮可保存为临时 WAV 供重播，应用退出时清理。
+模板为 `server/.env.example`，实际文件为 `/srv/ai-voice-interpreter/server/.env`，权限必须为 `600`。Phase 2.1 配置：
 
-官方接口参考：[Paraformer 实时识别 SDK](https://help.aliyun.com/en/model-studio/paraformer-real-time-speech-recognition-python-sdk)、[Qwen-MT 增量翻译](https://help.aliyun.com/en/model-studio/machine-translation)、[CosyVoice 流式合成 SDK](https://help.aliyun.com/en/model-studio/cosyvoice-python-sdk)。
+```dotenv
+STREAM_PIPELINE_PROVIDER=livetranslate
+STREAM_PIPELINE_FALLBACK_PROVIDER=modular
+ALLOW_STREAM_PIPELINE_OVERRIDE=false
 
-## HTTP Fallback
+LIVETRANSLATE_MODEL=qwen3.5-livetranslate-flash-realtime
+LIVETRANSLATE_SOURCE_LANGUAGE=zh
+LIVETRANSLATE_TARGET_LANGUAGE=en
+LIVETRANSLATE_OUTPUT_MODALITIES=text,audio
+LIVETRANSLATE_VOICE=Tina
+LIVETRANSLATE_ENABLE_SOURCE_TRANSCRIPTION=true
+LIVETRANSLATE_SOURCE_ASR_MODEL=qwen3-asr-flash-realtime
+LIVETRANSLATE_SOURCE_TRANSCRIPTION_FALLBACK=none
+LIVETRANSLATE_ENABLE_VOICE_CLONE=false
+LIVETRANSLATE_VOICE_CLONE_FREQUENCY=once
+LIVETRANSLATE_CONNECT_TIMEOUT_SECONDS=15
+LIVETRANSLATE_SESSION_FINISH_TIMEOUT_SECONDS=20
+LIVETRANSLATE_AUDIO_QUEUE_MAX_CHUNKS=100
+LIVETRANSLATE_HOTWORDS_JSON={"项目进度":"project progress","交付计划":"delivery plan"}
+```
 
-现有 `/v1/interpret` 保持可用。流式连接已建立、当前 Ring Buffer 有音频且尚未播放任何流式 TTS 时，如果 Provider、WebSocket 或客户端背压失败，客户端会：
+上游地址由 `DASHSCOPE_WORKSPACE_ID` 构造：
 
-1. 将当前 Ring Buffer 写为临时 WAV；
-2. 调用现有 HTTPS One-shot；
-3. 下载完整 WAV 并使用 `afplay`；
-4. GUI 明确显示 `HTTP Fallback`；
-5. 删除 Ring Buffer 临时 WAV。
+```text
+wss://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime
+?model=qwen3.5-livetranslate-flash-realtime
+```
 
-如果当前 Turn 已经播放过部分流式 TTS，不会自动重播完整句，以免重复音频；Session 会明确失败，用户可在下一轮切换按句模式。WSS 在采集开始前就无法建立时没有当前 Turn 可回退，GUI 会显示连接错误并允许直接选择按句模式。Fallback 不是静默降级。
+不要使用 `/api/v1` 或 `/compatible-mode/v1` 作为 LiveTranslate WebSocket 地址。TLS 验证始终开启。生产默认不允许客户端覆盖 Provider；非法 Provider 会使 `/readyz` 返回配置错误，不会静默选择其他链路。
 
-## Smoke、Benchmark 与 Soak
+`LIVETRANSLATE_HOTWORDS_JSON` 为空时不发送 `corpus`。当前默认只加入“项目进度 → project progress”和“交付计划 → delivery plan”。
 
-创建确定性测试音频：
+现有 modular 和 HTTP 配置继续保留：`ASR_MODEL=paraformer-v2` 用于 HTTP 文件识别，`STREAM_ASR_MODEL=paraformer-realtime-v2` 用于 modular Streaming，翻译为 `qwen-mt-flash`，TTS 为 `cosyvoice-v3-flash`。不要用实时 ASR 模型覆盖 HTTP ASR 模型。
+
+## Provider 权限探测
+
+权限探测会使用服务器现有 Key/Workspace，实时发送一段约 1–2 秒中文 PCM，但不播放输出、不自动重试：
 
 ```bash
-say -v Tingting -o /tmp/ai-interpreter-stream-test.aiff \
+make provider-permission-smoke
+```
+
+该命令会产生一次真实 Provider Session，可能计费。它只输出成功状态、模型、错误 code/message 和上游 Session/Response/Event ID，不输出 API Key 或 Gateway Token。重复的账户权限错误出现后应停止真实调用。
+
+## 真实 LiveTranslate Smoke
+
+准备中等句测试音频：
+
+```bash
+say -v Tingting -o /tmp/ai-interpreter-livetranslate.aiff \
   "你好，我们今天主要讨论项目进度和下一步的交付计划。"
 afconvert -f WAVE -d LEI16@16000 -c 1 \
-  /tmp/ai-interpreter-stream-test.aiff /tmp/ai-interpreter-stream-test.wav
+  /tmp/ai-interpreter-livetranslate.aiff \
+  /tmp/ai-interpreter-livetranslate.wav
 ```
 
-真实时间节奏的文件 Streaming Smoke：
+系统音色真实测试：
 
 ```bash
-make stream-smoke
+make livetranslate-smoke \
+  LIVETRANSLATE_SMOKE_FLAGS="--audio /tmp/ai-interpreter-livetranslate.wav --play --voice-mode standard"
 ```
 
-等价入口支持 `--base-url`、`--token`、`--audio`、`--microphone`、`--duration`、`--play`、`--keep-files`、`--repeat`、`--safe-mode`、`--headphones-mode`、`--max-turns` 和 `--json-report`。命令不会输出完整 Token；报告和音频目录均被 Git 忽略。
+只有系统音色成功后，才执行一次声音复刻测试：
 
-无收费 Mock Benchmark：
+```bash
+make livetranslate-smoke \
+  LIVETRANSLATE_SMOKE_FLAGS="--audio /tmp/ai-interpreter-livetranslate.wav --play --voice-mode clone-once"
+```
+
+入口还支持 `--microphone`、`--duration`、`--keep-files`、`--json-report`、`--max-turns` 和 `--no-source-transcription`。WAV 会按真实时间、100 ms 分块发送，Mac 不直连阿里云。默认输出报告位于被 Git 忽略的 `livetranslate-smoke-output/`。技术播放成功不等于主观音质或声音相似度已确认，最终听感需要用户本人确认。
+
+## 自动化测试、Benchmark 与 Soak
+
+自动化测试不调用收费 API：
+
+```bash
+make test
+make lint
+make server-test
+make server-lint
+make stream-test
+make livetranslate-test
+make doctor
+git diff --check
+```
+
+现有无收费 Mock Benchmark：
 
 ```bash
 make stream-benchmark
 ```
 
-输出 `benchmark-output/stream-benchmark.json` 和 `.md`。报告明确标记 `mock_streaming`，只用于本机回归，不代表真实网络性能。
+真实 Pipeline 对比报告只读取已存在的成功真实 Smoke，不发模型请求：
 
-30 分钟无收费稳定性测试：
+```bash
+make pipeline-benchmark
+```
+
+输出位于被忽略的 `pipeline-benchmark-output/`。缺少真实样本时显示 `unavailable`；单样本不计算 P95；Mock 延迟不会混入真实对比。
+
+30 分钟 Mock Soak：
 
 ```bash
 make stream-soak
 ```
 
-它持续模拟完整 WSS Turn，检查成功率、Tracemalloc 内存窗口、线程恢复和临时文件残留，报告写入被忽略的 `soak-output/`。短时开发检查可使用 `make stream-soak SOAK_MINUTES=0.1`，但不能代替正式 30 分钟验收。
+短时开发回归可用 `make stream-soak SOAK_MINUTES=0.1`，但不能代替正式 30 分钟记录。Mock、Benchmark 和 Soak 报告分别位于被忽略的输出目录。
 
-## 性能指标
-
-- `asr_first_partial_ms`：首个真实语音 Frame 到首个 ASR Partial。
-- `turn_finalize_ms`：实际语音结束到稳定 ASR Final，包含 VAD 静音判定等待。
-- `translation_first_token_ms`：翻译请求开始到首个增量 Token。
-- `tts_first_audio_ms`：首段 TTS 文本送出到服务端首个 PCM。
-- `client_first_playback_ms`：客户端估算的实际语音结束到首次设备写入。
-- `server_time_to_first_audio_ms`：服务端实际语音结束到首个下行 PCM。
-- `end_to_end_ttfa_ms`：客户端估算的语音开始到首次设备写入。
-- `turn_total_ms`：Turn 被 VAD 激活到翻译与音频发送完成。
-
-服务器与 Mac 使用各自 Monotonic Clock，不直接相减。真实报告保留服务端相对耗时与客户端相对耗时。
-
-## Gateway API
-
-公网基址：`https://gridworks.cn/tool/ai-interpreter-api`
+## Health、Ready 与隐私
 
 - `GET /healthz`：公开存活检查，不调用模型。
-- `GET /readyz`：公开配置、临时目录和 Streaming 状态检查，不调用模型。
-- `WSS /v1/stream`：Bearer Header 鉴权的流式入口。
-- `POST /v1/interpret`：Bearer Header 鉴权的完整 WAV One-shot。
-- `GET /v1/audio/{uuid}`：使用同一 Token 下载临时 TTS WAV。
+- `GET /readyz`：检查配置、临时目录、Streaming、默认/回退 Provider、Workspace、Source transcription 和 Voice clone，不调用模型。
+- `WSS /v1/stream`：Bearer 鉴权的流式入口。
+- `POST /v1/interpret`：Bearer 鉴权的 HTTP One-shot。
+- `GET /v1/audio/{uuid}`：下载 HTTP TTS 临时 WAV。
 
-HTTP Gateway 默认最大上传 20 MB、并发 2、TTS 文件 TTL 300 秒。WSS 默认总连接 2、同一 Token 连接 1、会话最长 3600 秒、心跳超时 60 秒、单 Frame 最大 65536 bytes。结构化错误会带 Error Code、Session/Turn/Request ID，但不会包含 Key 或 Token。
+`/readyz` 不返回 API Key、完整 Gateway Token、内部 Endpoint 或敏感 Header。INFO 日志只记录 ID、状态、长度、字节数、队列深度、使用量和延迟，不记录 API Key、Token、完整音频、Base64 音频或完整用户语音文本。
 
-## Nginx WebSocket 配置
+Mac Ring Buffer 默认只在内存保留最近 30 秒。HTTP Fallback WAV 用完即删；最后一轮重播 WAV 在退出时清理。服务器 Streaming 音频不落盘。`--keep-files` 只写入被忽略目录，使用者负责清理。
 
-仓库提供：
+所有输入、输出和播放队列均有上限；达到 80% 记录 Warning，队列满会结束 Session。客户端断开会立即取消上游连接、Sender/Receiver Task 和 Queue，避免后台继续调用收费模型。
 
-- `deploy/nginx-websocket-map.conf`：安装到 Nginx `http` context（通常 `/etc/nginx/conf.d/`），定义 `$connection_upgrade`。
-- `deploy/nginx-ai-interpreter.conf`：包含精确 WSS location 和原有 HTTP prefix location，放入现有 `gridworks.cn` HTTPS server block。
+## Nginx 与部署
 
-修改前将实际配置备份到 `/etc/nginx/backups/`，不要把备份放进 `sites-enabled`。必须先执行：
+仓库中的 `deploy/nginx-websocket-map.conf` 定义 `$connection_upgrade`，`deploy/nginx-ai-interpreter.conf` 提供 WSS 和 HTTP prefix location。当前服务器实际配置位于 `/etc/nginx/snippets/ai-interpreter.conf`，由现有 HTTPS server block 引入。
 
-```bash
-sudo nginx -T
-sudo nginx -t
-sudo systemctl reload nginx
-```
+只在现有配置不能工作时修改 Nginx。修改前先 `sudo nginx -T`，备份到 `/etc/nginx/backups/`，通过 `sudo nginx -t` 后只 reload；不得修改 ProjectAI location、证书或其他域名。
 
-WSS location 使用 HTTP/1.1 Upgrade、`$connection_upgrade`、3600 秒读写超时并关闭代理缓冲。不得修改证书、ProjectAI location 或其他应用的 upstream。
-
-## 服务器部署与回滚
-
-服务器配置模板为 `server/.env.example`。实际 `server/.env` 必须 `chmod 600`，配置 Workspace Key/ID、Native/Compatible Endpoint、MVP Token、模型与 Streaming 参数；Key 和 Token 不得进入 Git。HTTP 按句识别使用 `ASR_MODEL=paraformer-v2`，实时识别独立使用 `STREAM_ASR_MODEL=paraformer-realtime-v2`，不得用实时模型覆盖 HTTP Fallback 的文件识别模型。
+服务器部署：
 
 ```bash
 cd /srv/ai-voice-interpreter
@@ -253,34 +289,13 @@ curl http://127.0.0.1:8100/healthz
 curl http://127.0.0.1:8100/readyz
 ```
 
-Compose 项目名固定为 `ai-voice-interpreter`，单 Uvicorn Worker，容器使用非 root 用户，端口只绑定 `127.0.0.1:8100`。原始 WSS PCM 只在内存中传递，不在服务器落盘；Streaming TTS PCM 直接下行，不产生长期文件。HTTP One-shot 的上传在 `finally` 立即删除，TTS WAV 按 TTL 清理。
+Compose 项目为 `ai-voice-interpreter`，容器为 `ai-voice-interpreter-gateway`，端口只绑定 `127.0.0.1:8100`。不要停止、重启或修改 `/srv/projectai`、`project-ai-os` 或 `127.0.0.1:3100`。
 
-部署前记录旧 commit、Docker 状态、ProjectAI 状态和 Nginx 备份。若 Streaming 失败但 HTTP 正常，可在服务器 `.env` 设置 `STREAMING_ENABLED=false` 并只重建 Gateway；无需停止 ProjectAI。完整回滚时恢复已记录 commit 和 Nginx 备份，重建该 Compose，通过 `nginx -t` 后 reload。不要 force push、不要运行全局 Docker prune、不要操作其他 Compose 项目。
+如果 LiveTranslate 部署失败而 modular/HTTP 正常，可只把服务器 `STREAM_PIPELINE_PROVIDER` 改为 `modular` 并重建 Gateway。不要 force push、不要删除 Git 历史、不要执行全局 Docker prune、不要重启 Docker daemon或服务器。
 
-## 测试与提交前检查
+## Local Direct 与旧音色登记
 
-```bash
-make test
-make lint
-make server-test
-make server-lint
-make stream-test
-make doctor
-bash -n run_mvp.sh
-.venv/bin/python -c "import ai_voice_interpreter; print('import ok')"
-```
-
-自动化测试只使用 Mock/Fake，不调用收费 API，覆盖协议、鉴权、VAD、Stop Flush、Partial/Final、增量归一化、TTS 分段、二进制音频、连接与 Frame 限制、有界采集/播放队列、HTTP Fallback、不重复播放、临时文件清理，以及原有 HTTP、TTL、Doctor、GUI Worker 回归。
-
-## 临时音频、日志与隐私
-
-`.gitignore` 和 `.dockerignore` 排除 `.env`、虚拟环境、缓存、日志、截图、音频、Smoke、Benchmark 和 Soak 输出。Mac Ring Buffer 默认只在内存保留最近 30 秒；Fallback 临时 WAV 用完即删；最后一轮重播 WAV 在应用退出时清理。`KEEP_TEMP_AUDIO=true` 或 `--keep-files` 只供本地排障，使用者负责清理。
-
-INFO 日志只记录 ID、状态、文本长度、字节数、队列深度和耗时，不记录完整用户语音内容、API Key 或 Token。语音会发送到配置的 Gateway 和 DashScope Workspace 处理。
-
-## 声音复刻开发接口
-
-本轮真实验收固定使用系统音色，不执行声音复刻。未来在已获得声音所有者授权、Local Direct 配置完整时，可运行：
+`INTERPRETER_MODE=local` 仅供开发诊断，会让 Mac 直接调用 DashScope，不是产品默认，也不用于本轮 Remote 验收。现有 CosyVoice 预登记 CLI 只服务旧的 local/modular 开发链路：
 
 ```bash
 .venv/bin/python -m ai_voice_interpreter.voice_enrollment \
@@ -289,20 +304,4 @@ INFO 日志只记录 ID、状态、文本长度、字节数、队列深度和耗
   --language zh
 ```
 
-可加 `--write-config` 写入仓库外的 `~/.config/ai-voice-interpreter/config.env`。克隆 ID 必须属于当前 `TTS_MODEL`，否则配置检查会失败。
-
-## 常见错误
-
-- `4401`：Bearer Token 缺失或错误；检查 Mac 与服务器 Token 是否一致，不要在命令输出中打印值。
-- `4403`：服务器关闭了 Streaming；切换按句模式或检查 `STREAMING_ENABLED`。
-- `4429`：总连接或同 Token 连接达到上限；结束旧 Session 后重试。
-- `PROTOCOL_VERSION_UNSUPPORTED`：客户端和服务器协议版本不一致。
-- `HEARTBEAT_TIMEOUT`：网络中断或客户端停止发送心跳。
-- `SERVER_BACKPRESSURE` / `CLIENT_BACKPRESSURE`：有界队列已满；停止本轮并切换按句模式排查。
-- `ASR_*`、`TRANSLATION_*`、`TTS_*`：对应 Provider 阶段失败；记录 Error Code 和 Request ID，不记录凭证。
-
-## 当前限制
-
-当前版本是单向中文到英文的 Turn-based Streaming 语音翻译 MVP。它不是双向、全双工同声传译；建议使用耳机，当前没有声学回声消除。
-
-本版本不包含用户系统、支付、数据库、系统音频捕获、虚拟声卡、会议软件接入、端到端 LiveTranslate、声学回声消除、声音 Profile 管理或 Mac 安装包。多 Turn 以 VAD 划分并顺序处理，Translation 和 TTS 从稳定 ASR Final 开始，不是单词级全双工翻译。
+LiveTranslate 的本轮声音复刻使用服务端实时 `clone_once`，不使用该 CLI，也不开发 Voice Profile、样本管理或数据库。
