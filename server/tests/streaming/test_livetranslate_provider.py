@@ -135,6 +135,7 @@ def test_audio_delta_decodes_and_rejects_invalid_values() -> None:
 
 
 def test_output_pcm_spec_is_derived_from_session_response() -> None:
+    assert output_pcm_spec("pcm").sample_rate == 24000
     assert output_pcm_spec("pcm24").sample_rate == 24000
     with pytest.raises(LiveTranslateProviderError, match="UNSUPPORTED_OUTPUT_AUDIO_FORMAT"):
         output_pcm_spec("pcm16")

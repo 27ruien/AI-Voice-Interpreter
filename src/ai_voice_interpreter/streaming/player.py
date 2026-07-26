@@ -98,7 +98,7 @@ class PCMStreamingPlayer:
                 except (queue.Empty, queue.Full):
                     pass
         if thread is not None:
-            thread.join(timeout=5)
+            thread.join(timeout=self._stop_timeout_seconds())
             if thread.is_alive():
                 raise PlaybackError("流式播放线程未能及时结束。")
         if self._error is not None:
@@ -170,3 +170,8 @@ class PCMStreamingPlayer:
         if self.first_playback_at == 0:
             self.first_playback_at = time.monotonic()
         stream.write(pcm)
+
+    def _stop_timeout_seconds(self) -> float:
+        bytes_per_second = self.sample_rate * self.channels * self.sample_width
+        buffered_seconds = len(self._pcm) / bytes_per_second if bytes_per_second else 0
+        return max(5.0, min(float(self.queue_max_seconds + 2), buffered_seconds + 2.0))

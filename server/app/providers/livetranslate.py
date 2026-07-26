@@ -201,9 +201,10 @@ def decode_audio_delta(value: object) -> bytes:
 
 
 def output_pcm_spec(output_audio_format: object) -> PCMOutputSpec:
-    # The server's session.created/session.updated response uses pcm24 for
-    # 24 kHz, 16-bit mono PCM. We derive playback settings from that response.
-    if output_audio_format == "pcm24":
+    # The protocol requests generic ``pcm`` while current server responses may
+    # normalize that value to ``pcm24``. Both represent 24 kHz, 16-bit mono PCM
+    # for LiveTranslate output.
+    if output_audio_format in {"pcm", "pcm24"}:
         return PCMOutputSpec(sample_rate=24000)
     raise LiveTranslateProviderError(
         "UNSUPPORTED_OUTPUT_AUDIO_FORMAT",

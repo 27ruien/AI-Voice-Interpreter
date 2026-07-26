@@ -131,3 +131,13 @@ def test_pcm_player_rejects_audio_before_start() -> None:
     with pytest.raises(Exception, match="tts.audio.start"):
         player.feed(b"\0\0")
     player.cleanup()
+
+
+def test_pcm_player_stop_timeout_covers_buffered_audio() -> None:
+    player = PCMStreamingPlayer(queue_max_seconds=10)
+    player.sample_rate = 24000
+    player.channels = 1
+    player.sample_width = 2
+    player._pcm.extend(b"\0\0" * (24000 * 7))  # noqa: SLF001
+    assert player._stop_timeout_seconds() == 9.0  # noqa: SLF001
+    player.cleanup()

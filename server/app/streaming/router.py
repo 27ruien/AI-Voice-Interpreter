@@ -152,11 +152,17 @@ class RoutedStreamingSession:
                     )
                 ):
                     self._automatic_switches += 1
+                    error_code = getattr(
+                        startup.error, "code", type(startup.error).__name__
+                    )
+                    error_event_id = getattr(startup.error, "event_id", None)
                     logger.warning(
                         "LiveTranslate startup failed; switching once to modular "
-                        "client_request_id=%s type=%s",
+                        "client_request_id=%s type=%s code=%s event_id=%s",
                         self.request_id,
                         type(startup.error).__name__,
+                        error_code,
+                        error_event_id or "unavailable",
                     )
                     self._active = self.router.create_session(
                         "modular",
