@@ -1,4 +1,4 @@
-.PHONY: setup run test lint mock doctor server-test server-lint remote-smoke stream-test stream-smoke stream-benchmark stream-soak livetranslate-test provider-permission-smoke livetranslate-smoke pipeline-benchmark
+.PHONY: setup run test lint mock doctor server-test server-lint remote-smoke stream-test stream-smoke stream-benchmark stream-soak livetranslate-test provider-permission-smoke livetranslate-smoke pipeline-benchmark meeting-test meeting-doctor meeting-audio-doctor meeting-loopback-smoke meeting-bridge-smoke meeting-bridge-soak
 
 PYTHON ?= python3
 VENV := .venv
@@ -72,3 +72,33 @@ pipeline-benchmark:
 SOAK_MINUTES ?= 30
 stream-soak:
 	$(VENV_PYTHON) -m ai_voice_interpreter.stream_soak --minutes "$(SOAK_MINUTES)"
+
+meeting-test:
+	$(VENV_PYTHON) -m pytest \
+		tests/meeting \
+		server/tests/streaming/test_bridge_registry.py
+
+meeting-doctor:
+	$(VENV_PYTHON) -m ai_voice_interpreter.meeting.doctor
+
+MEETING_AUDIO_DOCTOR_FLAGS ?=
+meeting-audio-doctor:
+	$(VENV_PYTHON) -m ai_voice_interpreter.meeting.audio_doctor \
+		--json-report meeting-audio-doctor-output/report.json \
+		$(MEETING_AUDIO_DOCTOR_FLAGS)
+
+meeting-loopback-smoke:
+	$(VENV_PYTHON) -m ai_voice_interpreter.meeting.audio_doctor \
+		--json-report meeting-loopback-output/report.json --duration 1
+
+MEETING_BRIDGE_SMOKE_FLAGS ?= --no-real-api
+meeting-bridge-smoke:
+	$(VENV_PYTHON) -m ai_voice_interpreter.meeting_bridge_smoke \
+		--json-report meeting-bridge-smoke-output/report.json \
+		$(MEETING_BRIDGE_SMOKE_FLAGS)
+
+MEETING_SOAK_MINUTES ?= 30
+meeting-bridge-soak:
+	$(VENV_PYTHON) -m ai_voice_interpreter.meeting.soak \
+		--minutes "$(MEETING_SOAK_MINUTES)" \
+		--json-report meeting-bridge-soak-output/report.json

@@ -64,6 +64,10 @@ class StreamingGatewayClient:
         voice_mode: str = "standard",
         pipeline_provider: str | None = None,
         source_transcription_enabled: bool = True,
+        protocol_version: str = PROTOCOL_VERSION,
+        bridge_id: str | None = None,
+        session_role: str | None = None,
+        mode: str = "turn_stream",
     ) -> dict[str, Any]:
         if self._connection is not None:
             raise GatewayError("流式连接已经打开。")
@@ -72,7 +76,7 @@ class StreamingGatewayClient:
             request_id=self.request_id,
             source_language=source_language,
             target_language=target_language,
-            mode="turn_stream",
+            mode=mode,
             voice=voice,
             audio=AudioInputSpec("pcm_s16le", 16000, 1, chunk_ms),
             client_platform=f"macos-{platform.machine()}",
@@ -80,7 +84,9 @@ class StreamingGatewayClient:
             pipeline_provider=pipeline_provider,
             voice_mode=voice_mode,
             source_transcription_enabled=source_transcription_enabled,
-            protocol_version=PROTOCOL_VERSION,
+            protocol_version=protocol_version,
+            bridge_id=bridge_id,
+            session_role=session_role,
         )
         try:
             connection = self._connect_factory(

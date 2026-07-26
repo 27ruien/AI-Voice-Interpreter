@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -7,6 +8,7 @@ from PySide6.QtCore import QObject, Signal, Slot
 
 from ..audio.player import MacAudioPlayer
 from ..config import AppConfig
+from ..meeting.controller import BridgeState, MeetingBridgeController
 from ..models import PipelineResult, ProcessingStatus
 from ..streaming.controller import StreamingSessionController
 
@@ -114,3 +116,46 @@ class StreamingWorker(QObject):
             if self.controller.stream_player.last_turn_path is None:
                 self.controller.cleanup()
             self.finished.emit()
+
+
+class MeetingBridgeWorker(QObject):
+    event_received = Signal(str, object)
+    snapshot_changed = Signal(object)
+    state_changed = Signal(str)
+    completed = Signal()
+    failed = Signal(str)
+    finished = Signal()
+
+    def __init__(self, controller: MeetingBridgeController) -> None:
+        super().__init__()
+        self.controller = controller
+        self.controller.event_callback = self._emit_event
+        self._stop = threading.Event()
+
+    def request_stop(self) -> None:
+        self._stop.set()
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self.controller.start()
+            self.state_changed.emit(self.controller.state.value)
+            while not self._stop.wait(0.1):
+                self.state_changed.emit(self.controller.state.value)
+                self.snapshot_changed.emit(self.controller.snapshot())
+                if self.controller.state in {BridgeState.FAILED, BridgeState.STOPPED}:
+                    break
+            self.controller.stop()
+            self.state_changed.emit(self.controller.state.value)
+            if self.controller.state == BridgeState.FAILED:
+                self.failed.emit("Meeting Bridge 两个方向均已失败。")
+            else:
+                self.completed.emit()
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            self.controller.stop()
+            self.finished.emit()
+
+    def _emit_event(self, direction: str, event: dict[str, Any]) -> None:
+        self.event_received.emit(direction, event)

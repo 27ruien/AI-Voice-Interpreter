@@ -33,3 +33,9 @@ livetranslate-smoke-output/
 benchmark-output/
 pipeline-benchmark-output/
 soak-output/
+meeting-audio-doctor-output/
+meeting-loopback-output/
+meeting-bridge-smoke-output/
+meeting-bridge-soak-output/
+meeting-debug-audio/
+audio_routes.json

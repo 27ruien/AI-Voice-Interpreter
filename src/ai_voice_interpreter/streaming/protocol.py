@@ -7,6 +7,8 @@ from enum import StrEnum
 from typing import Any
 
 PROTOCOL_VERSION = "1.0"
+MEETING_PROTOCOL_VERSION = "1.1"
+SUPPORTED_PROTOCOL_VERSIONS = {PROTOCOL_VERSION, MEETING_PROTOCOL_VERSION}
 CLIENT_MESSAGE_TYPES = {"session.start", "session.stop", "ping"}
 
 
@@ -38,6 +40,11 @@ class ErrorCode(StrEnum):
     LIVETRANSLATE_AUDIO_INVALID = "LIVETRANSLATE_AUDIO_INVALID"
     SOURCE_TRANSCRIPTION_UNAVAILABLE = "SOURCE_TRANSCRIPTION_UNAVAILABLE"
     VOICE_CLONE_FAILED = "VOICE_CLONE_FAILED"
+    MEETING_BRIDGE_DISABLED = "MEETING_BRIDGE_DISABLED"
+    INVALID_BRIDGE_ID = "INVALID_BRIDGE_ID"
+    INVALID_SESSION_ROLE = "INVALID_SESSION_ROLE"
+    BRIDGE_ROLE_CONFLICT = "BRIDGE_ROLE_CONFLICT"
+    BRIDGE_LIMIT_REACHED = "BRIDGE_LIMIT_REACHED"
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
 
@@ -70,6 +77,8 @@ class SessionStart:
     voice_mode: str = "standard"
     source_transcription_enabled: bool = True
     protocol_version: str = PROTOCOL_VERSION
+    bridge_id: str | None = None
+    session_role: str | None = None
 
     @classmethod
     def parse(cls, payload: str | dict[str, Any]) -> SessionStart:
@@ -80,7 +89,7 @@ class SessionStart:
         if not isinstance(data, dict) or data.get("type") != "session.start":
             raise ProtocolError(ErrorCode.INVALID_SESSION_START, "首条消息必须是 session.start。")
         version = str(data.get("protocol_version", ""))
-        if version != PROTOCOL_VERSION:
+        if version not in SUPPORTED_PROTOCOL_VERSIONS:
             raise ProtocolError(
                 ErrorCode.PROTOCOL_VERSION_UNSUPPORTED,
                 f"不支持的协议版本：{version or 'missing'}。",
@@ -114,6 +123,12 @@ class SessionStart:
                     data.get("source_transcription_enabled", True)
                 ),
                 protocol_version=version,
+                bridge_id=(str(data["bridge_id"]) if data.get("bridge_id") else None),
+                session_role=(
+                    str(data["session_role"]).lower()
+                    if data.get("session_role")
+                    else None
+                ),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ProtocolError(
@@ -123,10 +138,21 @@ class SessionStart:
         return start
 
     def validate(self) -> None:
-        if self.source_language != "zh" or self.target_language != "en":
-            raise ProtocolError(ErrorCode.INVALID_SESSION_START, "当前仅支持中文到英文。")
-        if self.mode != "turn_stream":
-            raise ProtocolError(ErrorCode.INVALID_SESSION_START, "mode 必须是 turn_stream。")
+        if self.protocol_version == PROTOCOL_VERSION:
+            if self.source_language != "zh" or self.target_language != "en":
+                raise ProtocolError(ErrorCode.INVALID_SESSION_START, "协议 1.0 仅支持中文到英文。")
+            if self.mode != "turn_stream":
+                raise ProtocolError(
+                    ErrorCode.INVALID_SESSION_START,
+                    "协议 1.0 mode 必须是 turn_stream。",
+                )
+            if self.bridge_id is not None or self.session_role is not None:
+                raise ProtocolError(
+                    ErrorCode.INVALID_SESSION_START,
+                    "协议 1.0 不接受 Meeting Bridge 字段。",
+                )
+        else:
+            self._validate_meeting_bridge()
         if self.pipeline_provider not in {None, "livetranslate", "modular"}:
             raise ProtocolError(
                 ErrorCode.INVALID_SESSION_START,
@@ -146,6 +172,38 @@ class SessionStart:
             raise ProtocolError(
                 ErrorCode.INVALID_AUDIO_FORMAT,
                 "音频必须是 16 kHz、单声道、16-bit little-endian PCM。",
+            )
+
+    def _validate_meeting_bridge(self) -> None:
+        if self.mode != "meeting_bridge":
+            raise ProtocolError(
+                ErrorCode.INVALID_SESSION_START,
+                "协议 1.1 mode 必须是 meeting_bridge。",
+            )
+        try:
+            uuid.UUID(str(self.bridge_id))
+        except (TypeError, ValueError) as exc:
+            raise ProtocolError(
+                ErrorCode.INVALID_BRIDGE_ID, "bridge_id 必须是 UUID。"
+            ) from exc
+        expected_pairs = {
+            "local_to_remote": ("zh", "en"),
+            "remote_to_local": ("en", "zh"),
+        }
+        if self.session_role not in expected_pairs:
+            raise ProtocolError(
+                ErrorCode.INVALID_SESSION_ROLE,
+                "session_role 必须是 local_to_remote 或 remote_to_local。",
+            )
+        if (self.source_language, self.target_language) != expected_pairs[self.session_role]:
+            raise ProtocolError(
+                ErrorCode.INVALID_SESSION_ROLE,
+                "Meeting Bridge 方向与 source/target language 不匹配。",
+            )
+        if self.session_role == "remote_to_local" and self.voice_mode != "standard":
+            raise ProtocolError(
+                ErrorCode.INVALID_SESSION_START,
+                "remote_to_local 本轮只允许标准音色。",
             )
 
     def to_message(self) -> dict[str, Any]:
@@ -172,7 +230,15 @@ class SessionStart:
         }
         if self.pipeline_provider:
             message["pipeline_provider"] = self.pipeline_provider
+        if self.bridge_id:
+            message["bridge_id"] = self.bridge_id
+        if self.session_role:
+            message["session_role"] = self.session_role
         return message
+
+    @property
+    def is_meeting_bridge(self) -> bool:
+        return self.protocol_version == MEETING_PROTOCOL_VERSION
 
 
 def parse_control_message(payload: str) -> dict[str, Any]:

@@ -49,6 +49,22 @@ def test_http_and_streaming_asr_models_are_separate(tmp_path: Path) -> None:
     )
 
 
+def test_directional_provider_config_sets_asr_and_tts_language_hints(tmp_path: Path) -> None:
+    config = settings(tmp_path, cloned_voice_id="cosyvoice-v3-flash-clone-test")
+    remote = config.provider_config(
+        asr_model=config.stream_asr_model,
+        source_language="en",
+        target_language="zh",
+        allow_cloned_voice=False,
+    )
+    assert remote.source_language == "en"
+    assert remote.target_language == "zh"
+    assert remote.cloned_voice_id == ""
+    assert config.meeting_voice("local_to_remote") == "Tina"
+    assert config.meeting_voice("remote_to_local") == "Ethan"
+    assert config.meeting_voice_mode("local_to_remote", "standard") == "standard"
+
+
 class FakePipeline:
     def __init__(self, output_dir: Path, *, error: str | None = None) -> None:
         self.output_dir = output_dir
@@ -111,6 +127,13 @@ def test_health_and_ready_are_non_secret(
     assert streaming["workspace_configured"] is True
     assert streaming["voice_clone_enabled"] is False
     assert streaming["source_transcription_enabled"] is True
+    assert streaming["supported_protocol_versions"] == ["1.0", "1.1"]
+    assert streaming["streaming_max_connections_per_token"] == 2
+    assert streaming["bridge_sessions_supported"] is True
+    assert streaming["active_bridges"] == 0
+    assert streaming["active_directional_sessions"] == 0
+    assert streaming["meeting_local_to_remote_voice"] == "Tina"
+    assert streaming["meeting_remote_to_local_voice"] == "Ethan"
     assert pipeline.calls == 0
     assert API_KEY not in health.text + ready.text
     assert TOKEN not in health.text + ready.text

@@ -44,28 +44,45 @@ class StreamDependencies:
     translator_factory: Callable[[], StreamingTranslator]
     tts_factory: Callable[[], StreamingTTSSession]
     vad_factory: Callable[[], TurnVAD]
+    direction_factory: Callable[[str, str], StreamDependencies] | None = None
 
     @classmethod
     def real(cls, config: ServerConfig) -> StreamDependencies:
-        provider_config = config.provider_config(asr_model=config.stream_asr_model)
-        return cls(
-            asr_factory=lambda: DashScopeRealtimeASRSession(
-                provider_config, config.stream_audio_queue_max_chunks
-            ),
-            translator_factory=lambda: DashScopeStreamingTranslator(provider_config),
-            tts_factory=lambda: DashScopeStreamingTTSSession(
-                provider_config, config.stream_tts_audio_queue_max_chunks
-            ),
-            vad_factory=lambda: TurnVAD(
-                sample_rate=config.stream_audio_sample_rate,
-                frame_ms=config.vad_frame_ms,
-                aggressiveness=config.vad_aggressiveness,
-                min_speech_ms=config.vad_min_speech_ms,
-                silence_ms=config.vad_silence_ms,
-                pre_roll_ms=config.vad_pre_roll_ms,
-                max_turn_ms=config.vad_max_turn_ms,
-            ),
-        )
+        def build(source_language: str, target_language: str) -> StreamDependencies:
+            provider_config = config.provider_config(
+                asr_model=config.stream_asr_model,
+                source_language=source_language,
+                target_language=target_language,
+                allow_cloned_voice=source_language == "zh",
+            )
+            return cls(
+                asr_factory=lambda: DashScopeRealtimeASRSession(
+                    provider_config, config.stream_audio_queue_max_chunks
+                ),
+                translator_factory=lambda: DashScopeStreamingTranslator(provider_config),
+                tts_factory=lambda: DashScopeStreamingTTSSession(
+                    provider_config, config.stream_tts_audio_queue_max_chunks
+                ),
+                vad_factory=lambda: TurnVAD(
+                    sample_rate=config.stream_audio_sample_rate,
+                    frame_ms=config.vad_frame_ms,
+                    aggressiveness=config.vad_aggressiveness,
+                    min_speech_ms=config.vad_min_speech_ms,
+                    silence_ms=config.vad_silence_ms,
+                    pre_roll_ms=config.vad_pre_roll_ms,
+                    max_turn_ms=config.vad_max_turn_ms,
+                ),
+                direction_factory=build,
+            )
+
+        return build("zh", "en")
+
+    def for_direction(
+        self, source_language: str, target_language: str
+    ) -> StreamDependencies:
+        if self.direction_factory is None:
+            return self
+        return self.direction_factory(source_language, target_language)
 
 
 class StreamingConnectionRegistry:
@@ -206,10 +223,12 @@ class StreamingSession:
                     "type": "session.started",
                     "session_id": self.session_id,
                     "request_id": self.request_id,
-                    "protocol_version": self.config.streaming_protocol_version,
+                    "protocol_version": self.start_message.protocol_version,
                     "pipeline_provider": "modular",
                     "upstream_model": self.config.stream_asr_model,
                     "fallback_from": self.fallback_from,
+                    "bridge_id": self.start_message.bridge_id,
+                    "session_role": self.start_message.session_role,
                     "audio_output": {
                         "format": "pcm_s16le",
                         "sample_rate": 24000,
@@ -244,6 +263,8 @@ class StreamingSession:
                     "session_id": self.session_id,
                     "turn_count": self._turn_count,
                     "duration_ms": round((time.monotonic() - self.started_at) * 1000, 1),
+                    "bridge_id": self.start_message.bridge_id,
+                    "session_role": self.start_message.session_role,
                     "queue_peaks": {
                         "audio_input": self.input_queue_metrics.peak,
                         "turn": self.turn_queue_metrics.peak,
@@ -610,7 +631,10 @@ class StreamingSession:
         translation_sequence = 0
         try:
             async for event in self._translation_events(
-                translator, context.recognized_text
+                translator,
+                context.recognized_text,
+                self.start_message.source_language,
+                self.start_message.target_language,
             ):
                 if event is None:
                     for segment in segmenter.poll():
@@ -741,9 +765,15 @@ class StreamingSession:
             self._active_tts = None
 
     async def _translation_events(
-        self, translator: StreamingTranslator, text: str
+        self,
+        translator: StreamingTranslator,
+        text: str,
+        source_language: str,
+        target_language: str,
     ) -> AsyncIterator[TranslationStreamEvent | None]:
-        iterator = translator.translate_stream(text, "zh", "en").__aiter__()
+        iterator = translator.translate_stream(
+            text, source_language, target_language
+        ).__aiter__()
         next_event = asyncio.create_task(anext(iterator))
         tick_seconds = self.config.tts_text_max_wait_ms / 1000
         try:

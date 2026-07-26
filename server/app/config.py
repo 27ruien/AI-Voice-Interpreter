@@ -10,6 +10,8 @@ from dotenv import dotenv_values
 
 from ai_voice_interpreter.config import AppConfig
 
+SUPPORTED_MEETING_VOICES = {"Tina", "Ethan"}
+
 
 def _as_bool(value: str, default: bool) -> bool:
     if not value:
@@ -43,10 +45,10 @@ class ServerConfig:
     request_timeout_seconds: float = 120.0
     temp_audio_dir: Path = Path("/tmp/ai-voice-interpreter")
     streaming_enabled: bool = True
-    streaming_protocol_version: str = "1.0"
+    streaming_protocol_version: str = "1.1"
     streaming_max_session_seconds: int = 3600
     streaming_max_connections: int = 2
-    streaming_max_connections_per_token: int = 1
+    streaming_max_connections_per_token: int = 2
     streaming_heartbeat_seconds: int = 20
     streaming_heartbeat_timeout_seconds: int = 60
     streaming_max_frame_bytes: int = 65536
@@ -85,6 +87,17 @@ class ServerConfig:
     livetranslate_session_finish_timeout_seconds: float = 20.0
     livetranslate_audio_queue_max_chunks: int = 100
     livetranslate_hotwords: dict[str, str] = field(default_factory=dict)
+    meeting_bridge_enabled: bool = True
+    meeting_bridge_max_active_per_token: int = 1
+    meeting_bridge_allowed_language_pairs: tuple[tuple[str, str], ...] = (
+        ("zh", "en"),
+        ("en", "zh"),
+    )
+    meeting_local_to_remote_voice: str = "Tina"
+    meeting_local_to_remote_voice_mode: str = "standard"
+    meeting_remote_to_local_voice: str = "Ethan"
+    meeting_remote_to_local_voice_mode: str = "standard"
+    meeting_bridge_registry_ttl_seconds: int = 120
 
     @classmethod
     def load(
@@ -116,6 +129,15 @@ class ServerConfig:
                 raise ValueError(f"{name} 必须是字符串到字符串的 JSON 对象。")
             return {key.strip(): value.strip() for key, value in parsed.items() if key.strip()}
 
+        def get_language_pairs(name: str, default: str) -> tuple[tuple[str, str], ...]:
+            pairs: list[tuple[str, str]] = []
+            for raw_pair in get(name, default).split(","):
+                source, separator, target = raw_pair.strip().lower().partition(":")
+                if not separator or not source or not target:
+                    raise ValueError(f"{name} 必须使用 source:target 逗号列表。")
+                pairs.append((source, target))
+            return tuple(pairs)
+
         config = cls(
             app_env=get("APP_ENV", "production"),
             log_level=get("LOG_LEVEL", "INFO").upper(),
@@ -138,13 +160,13 @@ class ServerConfig:
             request_timeout_seconds=float(get("REQUEST_TIMEOUT_SECONDS", "120")),
             temp_audio_dir=Path(get("TEMP_AUDIO_DIR", "/tmp/ai-voice-interpreter")),
             streaming_enabled=_as_bool(get("STREAMING_ENABLED", "true"), True),
-            streaming_protocol_version=get("STREAMING_PROTOCOL_VERSION", "1.0"),
+            streaming_protocol_version=get("STREAMING_PROTOCOL_VERSION", "1.1"),
             streaming_max_session_seconds=int(
                 get("STREAMING_MAX_SESSION_SECONDS", "3600")
             ),
             streaming_max_connections=int(get("STREAMING_MAX_CONNECTIONS", "2")),
             streaming_max_connections_per_token=int(
-                get("STREAMING_MAX_CONNECTIONS_PER_TOKEN", "1")
+                get("STREAMING_MAX_CONNECTIONS_PER_TOKEN", "2")
             ),
             streaming_heartbeat_seconds=int(get("STREAMING_HEARTBEAT_SECONDS", "20")),
             streaming_heartbeat_timeout_seconds=int(
@@ -222,6 +244,28 @@ class ServerConfig:
                 get("LIVETRANSLATE_AUDIO_QUEUE_MAX_CHUNKS", "100")
             ),
             livetranslate_hotwords=get_json_map("LIVETRANSLATE_HOTWORDS_JSON"),
+            meeting_bridge_enabled=_as_bool(get("MEETING_BRIDGE_ENABLED", "true"), True),
+            meeting_bridge_max_active_per_token=int(
+                get("MEETING_BRIDGE_MAX_ACTIVE_PER_TOKEN", "1")
+            ),
+            meeting_bridge_allowed_language_pairs=get_language_pairs(
+                "MEETING_BRIDGE_ALLOWED_LANGUAGE_PAIRS", "zh:en,en:zh"
+            ),
+            meeting_local_to_remote_voice=get(
+                "MEETING_LOCAL_TO_REMOTE_VOICE", "Tina"
+            ),
+            meeting_local_to_remote_voice_mode=get(
+                "MEETING_LOCAL_TO_REMOTE_VOICE_MODE", "standard"
+            ).lower(),
+            meeting_remote_to_local_voice=get(
+                "MEETING_REMOTE_TO_LOCAL_VOICE", "Ethan"
+            ),
+            meeting_remote_to_local_voice_mode=get(
+                "MEETING_REMOTE_TO_LOCAL_VOICE_MODE", "standard"
+            ).lower(),
+            meeting_bridge_registry_ttl_seconds=int(
+                get("MEETING_BRIDGE_REGISTRY_TTL_SECONDS", "120")
+            ),
         )
         config.validate()
         return config
@@ -261,13 +305,15 @@ class ServerConfig:
             self.livetranslate_connect_timeout_seconds,
             self.livetranslate_session_finish_timeout_seconds,
             self.livetranslate_audio_queue_max_chunks,
+            self.meeting_bridge_max_active_per_token,
+            self.meeting_bridge_registry_ttl_seconds,
         )
         if any(value <= 0 for value in positive_stream_values):
             raise ValueError("流式容量和超时配置必须大于 0。")
         if self.streaming_heartbeat_timeout_seconds <= self.streaming_heartbeat_seconds:
             raise ValueError("心跳超时必须大于心跳间隔。")
-        if self.streaming_protocol_version != "1.0":
-            raise ValueError("当前服务器仅支持 STREAMING_PROTOCOL_VERSION=1.0。")
+        if self.streaming_protocol_version not in {"1.0", "1.1"}:
+            raise ValueError("STREAMING_PROTOCOL_VERSION 必须是 1.0 或 1.1。")
         if self.streaming_enabled and not self.vad_enabled:
             raise ValueError("当前 Turn-based Streaming 必须启用 VAD。")
         if self.stream_audio_sample_rate != 16000 or self.stream_audio_channels != 1:
@@ -299,6 +345,12 @@ class ServerConfig:
             raise ValueError("本轮声音复刻频率仅允许 once。")
         if self.livetranslate_enable_voice_clone and self.livetranslate_voice != "default":
             raise ValueError("启用 once 声音复刻时 LIVETRANSLATE_VOICE 必须是 default。")
+        if set(self.meeting_bridge_allowed_language_pairs) != {("zh", "en"), ("en", "zh")}:
+            raise ValueError("Meeting Bridge 本轮只允许 zh:en,en:zh。")
+        if self.meeting_local_to_remote_voice_mode not in {"standard", "clone_once"}:
+            raise ValueError("MEETING_LOCAL_TO_REMOTE_VOICE_MODE 无效。")
+        if self.meeting_remote_to_local_voice_mode != "standard":
+            raise ValueError("MEETING_REMOTE_TO_LOCAL_VOICE_MODE 必须是 standard。")
 
     @property
     def stream_provider_configuration_error(self) -> str | None:
@@ -306,14 +358,35 @@ class ServerConfig:
             return "STREAM_PIPELINE_PROVIDER 必须是 livetranslate 或 modular。"
         if self.stream_pipeline_fallback_provider not in {"modular", "none"}:
             return "STREAM_PIPELINE_FALLBACK_PROVIDER 必须是 modular 或 none。"
-        if (
-            self.stream_pipeline_provider == "modular"
-            and self.stream_pipeline_fallback_provider == "modular"
-        ):
-            return None
+        if self.meeting_bridge_enabled:
+            if self.meeting_local_to_remote_voice not in SUPPORTED_MEETING_VOICES:
+                return "MEETING_LOCAL_TO_REMOTE_VOICE 不在已验证系统音色列表。"
+            if self.meeting_remote_to_local_voice not in SUPPORTED_MEETING_VOICES:
+                return "MEETING_REMOTE_TO_LOCAL_VOICE 不在已验证系统音色列表。"
         return None
 
-    def provider_config(self, *, asr_model: str | None = None) -> AppConfig:
+    def meeting_voice(self, session_role: str | None) -> str:
+        if session_role == "local_to_remote":
+            return self.meeting_local_to_remote_voice
+        if session_role == "remote_to_local":
+            return self.meeting_remote_to_local_voice
+        return self.livetranslate_voice
+
+    def meeting_voice_mode(self, session_role: str | None, requested: str) -> str:
+        if session_role == "local_to_remote":
+            return self.meeting_local_to_remote_voice_mode
+        if session_role == "remote_to_local":
+            return self.meeting_remote_to_local_voice_mode
+        return requested
+
+    def provider_config(
+        self,
+        *,
+        asr_model: str | None = None,
+        source_language: str = "zh",
+        target_language: str = "en",
+        allow_cloned_voice: bool = True,
+    ) -> AppConfig:
         return AppConfig(
             app_mode="real",
             interpreter_mode="local",
@@ -322,8 +395,10 @@ class ServerConfig:
             dashscope_http_base_url=self.dashscope_native_base_url,
             asr_model=asr_model or self.asr_model,
             translation_model=self.translation_model,
+            source_language=source_language,
+            target_language=target_language,
             tts_model=self.tts_model,
             tts_voice=self.tts_voice,
-            cloned_voice_id=self.cloned_voice_id,
+            cloned_voice_id=self.cloned_voice_id if allow_cloned_voice else "",
             network_timeout_seconds=self.request_timeout_seconds,
         )

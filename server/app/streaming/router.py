@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from contextlib import suppress
 from typing import Protocol
 
 from fastapi import WebSocket
@@ -20,6 +21,7 @@ from ..providers.livetranslate import (
     LiveTranslateSessionOptions,
     LiveTranslateUpstreamSession,
 )
+from .bridge_registry import BridgeRegistry
 from .livetranslate_session import (
     LiveTranslateGatewaySession,
     LiveTranslateStartupFailure,
@@ -75,7 +77,9 @@ class StreamingPipelineRouter:
             return StreamingSession(
                 websocket,
                 self.config,
-                self.modular_dependencies,
+                self.modular_dependencies.for_direction(
+                    start.source_language, start.target_language
+                ),
                 start_message=start,
                 fallback_from=fallback_from,
             )
@@ -83,8 +87,12 @@ class StreamingPipelineRouter:
             options = LiveTranslateSessionOptions(
                 source_language=start.source_language,
                 target_language=start.target_language,
-                voice_mode=start.voice_mode,
+                voice_mode=self.config.meeting_voice_mode(
+                    start.session_role, start.voice_mode
+                ),
                 source_transcription_enabled=start.source_transcription_enabled,
+                voice=self.config.meeting_voice(start.session_role),
+                session_role=start.session_role,
             )
             return LiveTranslateGatewaySession(
                 websocket,
@@ -110,6 +118,9 @@ class RoutedStreamingSession:
         websocket: WebSocket,
         config: ServerConfig,
         router: StreamingPipelineRouter,
+        *,
+        token: str | None = None,
+        bridge_registry: BridgeRegistry | None = None,
     ) -> None:
         self.websocket = websocket
         self.config = config
@@ -119,6 +130,10 @@ class RoutedStreamingSession:
         self._active: StreamingPipelineSession | None = None
         self._closed = False
         self._automatic_switches = 0
+        self.token = token
+        self.bridge_registry = bridge_registry
+        self._bridge_registration: tuple[str, str, str] | None = None
+        self._bridge_touch_task: asyncio.Task[None] | None = None
 
     async def run(self) -> None:
         try:
@@ -138,8 +153,44 @@ class RoutedStreamingSession:
                 )
             start = SessionStart.parse(first["text"])
             self.request_id = start.request_id
+            if start.is_meeting_bridge:
+                if not self.config.meeting_bridge_enabled:
+                    raise ProtocolError(
+                        ErrorCode.MEETING_BRIDGE_DISABLED,
+                        "服务器未启用 Meeting Bridge。",
+                    )
+                if (
+                    start.source_language,
+                    start.target_language,
+                ) not in self.config.meeting_bridge_allowed_language_pairs:
+                    raise ProtocolError(
+                        ErrorCode.INVALID_SESSION_ROLE,
+                        "服务器未允许该 Meeting Bridge 语言方向。",
+                    )
+                if self.bridge_registry is None or self.token is None:
+                    raise ProtocolError(
+                        ErrorCode.PIPELINE_CONFIGURATION_INVALID,
+                        "Meeting Bridge Registry 未初始化。",
+                    )
             provider = self.router.resolve_provider(start)
             self._active = self.router.create_session(provider, self.websocket, start)
+            if start.is_meeting_bridge:
+                assert start.bridge_id is not None and start.session_role is not None
+                active_session_id = str(getattr(self._active, "session_id", self.session_id))
+                await self.bridge_registry.register(
+                    token=self.token,
+                    bridge_id=start.bridge_id,
+                    role=start.session_role,
+                    session_id=active_session_id,
+                )
+                self._bridge_registration = (
+                    start.bridge_id,
+                    start.session_role,
+                    active_session_id,
+                )
+                self._bridge_touch_task = asyncio.create_task(
+                    self._touch_bridge(start.bridge_id)
+                )
             try:
                 await self._active.run()
             except LiveTranslateStartupFailure as startup:
@@ -185,6 +236,25 @@ class RoutedStreamingSession:
         self._closed = True
         if self._active is not None:
             await self._active.cleanup()
+        if self._bridge_touch_task is not None:
+            self._bridge_touch_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._bridge_touch_task
+            self._bridge_touch_task = None
+        if self._bridge_registration is not None and self.bridge_registry is not None:
+            bridge_id, role, session_id = self._bridge_registration
+            await self.bridge_registry.release(bridge_id, role, session_id)
+            self._bridge_registration = None
+
+    async def _touch_bridge(self, bridge_id: str) -> None:
+        assert self.bridge_registry is not None
+        interval = max(
+            1.0,
+            min(30.0, self.config.meeting_bridge_registry_ttl_seconds / 3),
+        )
+        while True:
+            await asyncio.sleep(interval)
+            await self.bridge_registry.touch(bridge_id)
 
     async def _safe_error(self, code: ErrorCode, message: str) -> None:
         try:

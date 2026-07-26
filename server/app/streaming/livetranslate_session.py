@@ -76,6 +76,9 @@ class LiveTranslateGatewaySession:
         self.start_message = start_message
         self.session_id = new_id()
         self.request_id = start_message.request_id
+        self.voice_mode = config.meeting_voice_mode(
+            start_message.session_role, start_message.voice_mode
+        )
         self.started_at = time.monotonic()
         self.state = SessionState.CONNECTED
         self.metrics = SessionMetrics()
@@ -84,8 +87,10 @@ class LiveTranslateGatewaySession:
             LiveTranslateSessionOptions(
                 source_language=start_message.source_language,
                 target_language=start_message.target_language,
-                voice_mode=start_message.voice_mode,
+                voice_mode=self.voice_mode,
                 source_transcription_enabled=start_message.source_transcription_enabled,
+                voice=config.meeting_voice(start_message.session_role),
+                session_role=start_message.session_role,
             ),
         )
         self.source_normalizers: dict[str, TranscriptNormalizer] = {}
@@ -124,15 +129,17 @@ class LiveTranslateGatewaySession:
                     "type": "session.started",
                     "session_id": self.session_id,
                     "request_id": self.request_id,
-                    "protocol_version": self.config.streaming_protocol_version,
+                    "protocol_version": self.start_message.protocol_version,
                     "pipeline_provider": "livetranslate",
                     "upstream_model": self.upstream.model,
                     "upstream_session_id": self.upstream.session_id,
-                    "voice_mode": self.start_message.voice_mode,
+                    "voice_mode": self.voice_mode,
                     "source_transcription_enabled": (
                         self.start_message.source_transcription_enabled
                         and self.config.livetranslate_enable_source_transcription
                     ),
+                    "bridge_id": self.start_message.bridge_id,
+                    "session_role": self.start_message.session_role,
                     "audio_output": {
                         "format": self.upstream.output_spec.format,
                         "sample_rate": self.upstream.output_spec.sample_rate,
@@ -154,12 +161,12 @@ class LiveTranslateGatewaySession:
                 {
                     "type": "voice_clone.status",
                     "session_id": self.session_id,
-                    "enabled": self.start_message.voice_mode == "clone_once",
+                    "enabled": self.voice_mode == "clone_once",
                     "frequency": (
-                        "once" if self.start_message.voice_mode == "clone_once" else None
+                        "once" if self.voice_mode == "clone_once" else None
                     ),
                     "status": (
-                        "waiting_for_voice" if self.start_message.voice_mode == "clone_once"
+                        "waiting_for_voice" if self.voice_mode == "clone_once"
                         else "disabled"
                     ),
                 }
@@ -171,7 +178,7 @@ class LiveTranslateGatewaySession:
                 self.request_id,
                 self.upstream.session_id,
                 self.upstream.model,
-                self.start_message.voice_mode,
+                self.voice_mode,
             )
             receiver_task = asyncio.create_task(self._receive_client())
             events_task = asyncio.create_task(self._forward_upstream_events())
@@ -214,6 +221,8 @@ class LiveTranslateGatewaySession:
                     "pipeline_provider": "livetranslate",
                     "upstream_session_id": self.upstream.session_id,
                     "last_event_id": self._last_event_id,
+                    "bridge_id": self.start_message.bridge_id,
+                    "session_role": self.start_message.session_role,
                     "queue_peaks": {
                         "audio_input": self.upstream.audio_queue_peak,
                         "upstream_output": self.upstream.output_queue_peak,
@@ -559,7 +568,7 @@ class LiveTranslateGatewaySession:
                     "event_id": _optional_text(event.get("event_id")),
                 }
             )
-            if self.start_message.voice_mode == "clone_once":
+            if self.voice_mode == "clone_once":
                 await self._send_json(
                     {
                         "type": "voice_clone.status",

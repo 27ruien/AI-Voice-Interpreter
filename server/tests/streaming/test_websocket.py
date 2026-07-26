@@ -59,6 +59,14 @@ def dependencies(
     )
 
 
+def test_real_modular_dependencies_are_direction_aware(tmp_path: Path) -> None:
+    selected = StreamDependencies.real(config(tmp_path)).for_direction("en", "zh")
+    asr = selected.asr_factory()
+    tts = selected.tts_factory()
+    assert asr.config.source_language == "en"
+    assert tts.config.target_language == "zh"
+
+
 def start_message(version: str = "1.0") -> dict[str, object]:
     return {
         "type": "session.start",

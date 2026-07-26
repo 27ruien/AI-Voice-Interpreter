@@ -9,12 +9,15 @@ from typing import Any
 from PySide6.QtCore import Qt, QThread
 from PySide6.QtGui import QCloseEvent, QFont
 from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
     QComboBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QTextEdit,
@@ -26,8 +29,13 @@ from ..audio.player import MacAudioPlayer
 from ..audio.recorder import MicrophoneRecorder
 from ..config import AppConfig
 from ..exceptions import InterpreterError
+from ..meeting.controller import MeetingBridgeController
+from ..meeting.devices import AudioDeviceCatalog, AudioRouteProfile
+from ..meeting.doctor import collect_checks as collect_meeting_checks
+from ..meeting.doctor import format_report as format_meeting_report
+from ..meeting.doctor import gateway_readyz
 from ..models import PipelineResult, ProcessingStatus
-from .workers import PlaybackWorker, ProcessingWorker, StreamingWorker
+from .workers import MeetingBridgeWorker, PlaybackWorker, ProcessingWorker, StreamingWorker
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +56,7 @@ class MainWindow(QMainWindow):
         self.latest_audio_path: Path | None = None
         self._thread: QThread | None = None
         self._worker: Any | None = None
+        self._meeting_catalog: AudioDeviceCatalog | None = None
         self._build_ui()
         self._set_status(ProcessingStatus.READY)
         self._show_startup_notice()
@@ -89,6 +98,7 @@ class MainWindow(QMainWindow):
         self.mode_combo = QComboBox()
         self.mode_combo.addItem("流式模式", "remote_stream")
         self.mode_combo.addItem("按句模式", "remote")
+        self.mode_combo.addItem("会议桥接", "meeting_bridge")
         selected = (
             "remote_stream"
             if self.config.app_mode == "real" and self.config.interpreter_mode == "remote_stream"
@@ -146,6 +156,9 @@ class MainWindow(QMainWindow):
             stream_status.addWidget(value, 1, index)
             self.stream_labels[key] = value
         layout.addLayout(stream_status)
+
+        self.meeting_frame = self._build_meeting_frame()
+        layout.addWidget(self.meeting_frame)
 
         button_row = QHBoxLayout()
         self.start_button = QPushButton("开始录音")
@@ -225,6 +238,9 @@ class MainWindow(QMainWindow):
     def _start_recording(self) -> None:
         if self._thread is not None:
             return
+        if self.mode_combo.currentData() == "meeting_bridge":
+            self._start_meeting_bridge()
+            return
         if self.mode_combo.currentData() == "remote_stream":
             self._start_streaming()
             return
@@ -243,6 +259,11 @@ class MainWindow(QMainWindow):
             self._fail(str(exc))
 
     def _stop_and_translate(self) -> None:
+        if isinstance(self._worker, MeetingBridgeWorker):
+            self._worker.request_stop()
+            self.status_label.setText("STOPPING")
+            self.stop_button.setEnabled(False)
+            return
         if isinstance(self._worker, StreamingWorker):
             self._worker.request_stop()
             self.status_label.setText("正在结束并刷新当前 Turn")
@@ -290,6 +311,9 @@ class MainWindow(QMainWindow):
     def _worker_thread_finished(self) -> None:
         self._thread = None
         self._worker = None
+        if self.mode_combo.currentData() == "meeting_bridge":
+            self.start_button.setEnabled(True)
+            self.stop_button.setEnabled(False)
 
     def _display_result(self, result: PipelineResult) -> None:
         self.source_text.setPlainText(result.recognized_text)
@@ -433,11 +457,19 @@ class MainWindow(QMainWindow):
         self.latest_audio_path = path
 
     def _mode_changed(self) -> None:
-        streaming = self.mode_combo.currentData() == "remote_stream"
+        mode = self.mode_combo.currentData()
+        streaming = mode == "remote_stream"
+        meeting = mode == "meeting_bridge"
         self.capture_combo.setEnabled(streaming)
         self.voice_combo.setEnabled(streaming)
-        self.start_button.setText("开始同传" if streaming else "开始录音")
-        self.stop_button.setText("停止同传" if streaming else "停止并翻译")
+        self.meeting_frame.setVisible(meeting)
+        self.start_button.setText(
+            "Start Meeting Bridge" if meeting else "开始同传" if streaming else "开始录音"
+        )
+        self.stop_button.setText(
+            "Stop Meeting Bridge" if meeting else "停止同传" if streaming else "停止并翻译"
+        )
+        self.replay_button.setEnabled(not meeting and self.latest_audio_path is not None)
 
     def _reset_stream_labels(self) -> None:
         for label in self.stream_labels.values():
@@ -469,7 +501,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 (Qt API)
         logger.info("Application window closing")
         self.player.stop()
-        if isinstance(self._worker, StreamingWorker):
+        if isinstance(self._worker, (StreamingWorker, MeetingBridgeWorker)):
             self._worker.request_stop()
         if (
             self._thread is not None
@@ -491,6 +523,266 @@ class MainWindow(QMainWindow):
         ):
             shutil.rmtree(self.latest_audio_path.parent, ignore_errors=True)
         event.accept()
+
+    def _build_meeting_frame(self) -> QFrame:
+        frame = QFrame()
+        frame.setFrameShape(QFrame.Shape.StyledPanel)
+        layout = QVBoxLayout(frame)
+        warning = QLabel(
+            "会议桥接模式必须使用耳机。外放可能导致中文译音重新进入物理麦克风；"
+            "当前版本没有声学回声消除。"
+        )
+        warning.setWordWrap(True)
+        warning.setStyleSheet("background:#fff7ed;color:#9a3412;padding:8px;")
+        layout.addWidget(warning)
+        grid = QGridLayout()
+        self.meeting_device_combos: dict[str, QComboBox] = {}
+        roles = (
+            ("local_microphone", "我的麦克风"),
+            ("meeting_virtual_microphone_output", "发送给会议（BlackHole 2ch）"),
+            ("meeting_audio_capture_input", "接收会议（BlackHole 16ch）"),
+            ("local_headphones_output", "我的耳机"),
+        )
+        for row, (key, label) in enumerate(roles):
+            grid.addWidget(QLabel(label), row, 0)
+            combo = QComboBox()
+            combo.setObjectName(f"meeting_{key}")
+            grid.addWidget(combo, row, 1)
+            self.meeting_device_combos[key] = combo
+        layout.addLayout(grid)
+        actions = QHBoxLayout()
+        refresh = QPushButton("刷新设备")
+        save = QPushButton("保存设置")
+        doctor = QPushButton("运行音频自检")
+        guide = QPushButton("打开会议设置说明")
+        copy = QPushButton("复制设置摘要")
+        refresh.clicked.connect(self._refresh_meeting_devices)
+        save.clicked.connect(self._save_meeting_routes)
+        doctor.clicked.connect(self._run_meeting_doctor)
+        guide.clicked.connect(self._show_meeting_guide)
+        copy.clicked.connect(self._copy_meeting_summary)
+        for button in (refresh, save, doctor, guide, copy):
+            actions.addWidget(button)
+        layout.addLayout(actions)
+        self.meeting_setup_confirmed = QCheckBox("已完成会议软件设置")
+        layout.addWidget(self.meeting_setup_confirmed)
+        self.meeting_global_label = QLabel("Meeting Bridge：UNCONFIGURED")
+        layout.addWidget(self.meeting_global_label)
+        cards = QGridLayout()
+        self.meeting_direction_labels: dict[str, dict[str, QLabel]] = {}
+        for column, (direction, title) in enumerate(
+            (
+                ("local_to_remote", "我说中文 → 对方听英文"),
+                ("remote_to_local", "对方说英文 → 我听中文"),
+            )
+        ):
+            card = QFrame()
+            card.setFrameShape(QFrame.Shape.StyledPanel)
+            card_layout = QVBoxLayout(card)
+            card_layout.addWidget(QLabel(title))
+            labels: dict[str, QLabel] = {}
+            for key, initial in (
+                ("state", "Disconnected"),
+                ("route", "输入 / 输出：—"),
+                ("level", "输入电平：Idle"),
+                ("source_partial", "源字幕 Partial：—"),
+                ("source_final", "源字幕 Final：—"),
+                ("translation_partial", "翻译 Partial：—"),
+                ("translation_final", "翻译 Final：—"),
+                ("latency", "首译音：—"),
+                ("voice", "音色：—"),
+                ("provider", "Provider：—"),
+                ("fallback", "Fallback：否"),
+                ("error", "错误：—"),
+            ):
+                value = QLabel(initial)
+                value.setWordWrap(True)
+                card_layout.addWidget(value)
+                labels[key] = value
+            self.meeting_direction_labels[direction] = labels
+            cards.addWidget(card, 0, column)
+        layout.addLayout(cards)
+        self._refresh_meeting_devices()
+        frame.setVisible(False)
+        return frame
+
+    def _refresh_meeting_devices(self) -> None:
+        try:
+            catalog = AudioDeviceCatalog.discover()
+            self._meeting_catalog = catalog
+            profile = AudioRouteProfile.load()
+            selected = {
+                key: getattr(profile, key) if profile else ""
+                for key in self.meeting_device_combos
+            }
+            groups = {
+                "local_microphone": catalog.microphones(),
+                "meeting_virtual_microphone_output": catalog.blackhole(2),
+                "meeting_audio_capture_input": catalog.blackhole(16),
+                "local_headphones_output": catalog.headphones(),
+            }
+            for key, combo in self.meeting_device_combos.items():
+                combo.clear()
+                combo.addItem("请选择", "")
+                for device in groups[key]:
+                    combo.addItem(device.safe_name, device.stable_key)
+                index = combo.findData(selected[key])
+                combo.setCurrentIndex(max(0, index))
+            if profile:
+                self.meeting_setup_confirmed.setChecked(profile.meeting_setup_confirmed)
+        except Exception as exc:
+            self.error_text.setPlainText(f"刷新会议音频设备失败：{exc}")
+
+    def _selected_meeting_profile(self) -> AudioRouteProfile:
+        values = {
+            key: str(combo.currentData() or "")
+            for key, combo in self.meeting_device_combos.items()
+        }
+        if not all(values.values()):
+            raise InterpreterError("必须明确选择四个 Meeting Bridge 音频端点。")
+        return AudioRouteProfile(
+            **values,
+            meeting_setup_confirmed=self.meeting_setup_confirmed.isChecked(),
+        )
+
+    def _save_meeting_routes(self) -> None:
+        try:
+            path = self._selected_meeting_profile().save()
+            self.error_text.setPlainText(f"会议音频设置已保存：{path.name}")
+        except Exception as exc:
+            self._fail(str(exc))
+
+    def _run_meeting_doctor(self) -> None:
+        try:
+            profile = self._selected_meeting_profile()
+        except Exception:
+            profile = None
+        checks, ready = collect_meeting_checks(
+            self.config,
+            self._meeting_catalog or AudioDeviceCatalog.discover(),
+            profile,
+        )
+        self.error_text.setPlainText(format_meeting_report(checks, ready))
+
+    def _start_meeting_bridge(self) -> None:
+        try:
+            if self._thread is not None:
+                return
+            catalog = self._meeting_catalog or AudioDeviceCatalog.discover()
+            profile = self._selected_meeting_profile()
+            profile.save()
+            route = profile.resolve(catalog)
+            if route is None:
+                raise InterpreterError("保存的设备无法重新解析，请刷新并重新选择。")
+            ready = gateway_readyz(self.config)
+            if ready is None:
+                raise InterpreterError("Gateway readyz 不可访问。")
+            controller = MeetingBridgeController(
+                self.config,
+                route,
+                profile,
+                gateway_ready=ready,
+            )
+            worker = MeetingBridgeWorker(controller)
+            worker.event_received.connect(self._handle_meeting_event)
+            worker.snapshot_changed.connect(self._handle_meeting_snapshot)
+            worker.state_changed.connect(self._meeting_state_changed)
+            worker.completed.connect(lambda: self._meeting_state_changed("STOPPED"))
+            worker.failed.connect(self._fail)
+            self.start_button.setEnabled(False)
+            self.stop_button.setEnabled(True)
+            self.replay_button.setEnabled(False)
+            self._meeting_state_changed("STARTING")
+            self._start_worker(worker)
+        except Exception as exc:
+            self._fail(str(exc))
+
+    def _handle_meeting_event(self, direction: str, event: dict[str, Any]) -> None:
+        labels = self.meeting_direction_labels[direction]
+        event_type = str(event.get("type", ""))
+        if event_type == "session.started":
+            labels["state"].setText("Connected / Listening")
+            labels["provider"].setText(
+                f"Provider：{event.get('pipeline_provider', 'unknown')}"
+            )
+            self.meeting_global_label.setText(
+                f"Meeting Bridge：RUNNING · bridge_id={event.get('bridge_id', '—')}"
+            )
+        elif event_type == "asr.partial":
+            labels["source_partial"].setText(
+                f"源字幕 Partial：{event.get('text', '')}"
+            )
+        elif event_type == "asr.final":
+            labels["source_final"].setText(f"源字幕 Final：{event.get('text', '')}")
+        elif event_type == "translation.partial":
+            labels["translation_partial"].setText(
+                f"翻译 Partial：{event.get('text', '')}"
+            )
+        elif event_type == "translation.final":
+            labels["translation_final"].setText(
+                f"翻译 Final：{event.get('text', '')}"
+            )
+        elif event_type == "provider.changed":
+            labels["fallback"].setText("Fallback：Modular")
+        elif event_type == "error":
+            labels["error"].setText(f"错误：{event.get('message', '')}")
+            labels["state"].setText("Failed")
+
+    def _handle_meeting_snapshot(self, snapshot: dict[str, Any]) -> None:
+        directions = snapshot.get("directions", {})
+        if not isinstance(directions, dict):
+            return
+        for direction, details in directions.items():
+            if direction not in self.meeting_direction_labels or not isinstance(
+                details, dict
+            ):
+                continue
+            labels = self.meeting_direction_labels[direction]
+            metrics = details.get("metrics", {})
+            if not isinstance(metrics, dict):
+                metrics = {}
+            labels["state"].setText(str(details.get("state", "Disconnected")))
+            labels["route"].setText(
+                f"输入：{details.get('input_device', '—')} / "
+                f"输出：{details.get('output_device', '—')}"
+            )
+            labels["level"].setText(
+                f"输入电平 RMS：{float(metrics.get('rms', 0.0)):.4f}"
+            )
+            labels["latency"].setText(
+                f"首译音：{float(metrics.get('first_output_write_ms', 0.0)):.0f} ms"
+            )
+            labels["voice"].setText(
+                f"音色：{details.get('voice', '—')} ({details.get('voice_mode', '—')})"
+            )
+
+    def _meeting_state_changed(self, state: str) -> None:
+        self.status_label.setText(state)
+        if not self.meeting_global_label.text().startswith("Meeting Bridge：RUNNING ·"):
+            self.meeting_global_label.setText(f"Meeting Bridge：{state}")
+        if state == "DEGRADED":
+            self.meeting_global_label.setText("Meeting Bridge：DEGRADED")
+        elif state in {"STOPPED", "FAILED"}:
+            self.meeting_global_label.setText(f"Meeting Bridge：{state}")
+            for labels in self.meeting_direction_labels.values():
+                labels["state"].setText("Disconnected")
+                labels["level"].setText("输入电平：Idle")
+
+    def _show_meeting_guide(self) -> None:
+        QMessageBox.information(
+            self,
+            "会议软件设置",
+            "Zoom / Teams / 浏览器会议：\n\n"
+            "Microphone：BlackHole 2ch\n"
+            "Speaker：BlackHole 16ch\n\n"
+            "不要修改 macOS 系统默认设备；必须佩戴耳机。",
+        )
+
+    def _copy_meeting_summary(self) -> None:
+        QApplication.clipboard().setText(
+            "Meeting Microphone: BlackHole 2ch\nMeeting Speaker: BlackHole 16ch"
+        )
+        self.error_text.setPlainText("会议设置摘要已复制，不包含 Token 或密钥。")
 
 
 def _format_ms(value: float) -> str:

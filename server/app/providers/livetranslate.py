@@ -60,6 +60,8 @@ class LiveTranslateSessionOptions:
     target_language: str = "en"
     voice_mode: str = "standard"
     source_transcription_enabled: bool = True
+    voice: str | None = None
+    session_role: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,16 +131,21 @@ def build_session_update(
     config: ServerConfig,
     options: LiveTranslateSessionOptions,
 ) -> dict[str, Any]:
-    if options.source_language != "zh" or options.target_language != "en":
+    if (options.source_language, options.target_language) not in {
+        ("zh", "en"),
+        ("en", "zh"),
+    }:
         raise LiveTranslateProviderError(
-            "UNSUPPORTED_LANGUAGE", "当前 LiveTranslate 仅支持中文到英文。"
+            "UNSUPPORTED_LANGUAGE", "当前 LiveTranslate 仅支持中文和英文双向翻译。"
         )
     if options.voice_mode not in {"standard", "clone_once"}:
         raise LiveTranslateProviderError("INVALID_VOICE_MODE", "无效的声音模式。")
     clone_enabled = options.voice_mode == "clone_once" or (
-        options.voice_mode == "standard" and config.livetranslate_enable_voice_clone
+        options.voice_mode == "standard"
+        and config.livetranslate_enable_voice_clone
+        and options.session_role != "remote_to_local"
     )
-    voice = "default" if clone_enabled else config.livetranslate_voice
+    voice = "default" if clone_enabled else (options.voice or config.livetranslate_voice)
     if clone_enabled and config.livetranslate_voice_clone_frequency != "once":
         raise LiveTranslateProviderError(
             "INVALID_VOICE_CLONE_CONFIG", "本轮声音复刻频率仅允许 once。"

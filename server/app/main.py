@@ -22,6 +22,7 @@ from .config import ServerConfig
 from .errors import GatewayHTTPError
 from .pipeline import build_server_pipeline, generated_audio_size
 from .providers.livetranslate import LiveTranslateSessionOptions, LiveTranslateUpstreamSession
+from .streaming.bridge_registry import BridgeRegistry
 from .streaming.router import RoutedStreamingSession, StreamingPipelineRouter
 from .streaming.session import (
     StreamDependencies,
@@ -74,10 +75,14 @@ def create_app(
         settings.streaming_max_connections,
         settings.streaming_max_connections_per_token,
     )
+    bridge_registry = BridgeRegistry(
+        settings.meeting_bridge_max_active_per_token,
+        settings.meeting_bridge_registry_ttl_seconds,
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        task = asyncio.create_task(_cleanup_loop(store))
+        task = asyncio.create_task(_cleanup_loop(store, bridge_registry))
         yield
         task.cancel()
         with suppress(asyncio.CancelledError):
@@ -97,6 +102,7 @@ def create_app(
     app.state.gate = gate
     app.state.stream_registry = stream_registry
     app.state.stream_router = stream_router
+    app.state.bridge_registry = bridge_registry
 
     @app.middleware("http")
     async def request_context(request: Request, call_next: Any) -> Any:
@@ -145,6 +151,7 @@ def create_app(
             "streaming": {
                 "enabled": settings.streaming_enabled,
                 "protocol_version": settings.streaming_protocol_version,
+                "supported_protocol_versions": ["1.0", "1.1"],
                 "active_sessions": stream_registry.active,
                 "active_upstream_connections": (
                     LiveTranslateUpstreamSession.active_connections
@@ -156,6 +163,20 @@ def create_app(
                 "voice_clone_enabled": settings.livetranslate_enable_voice_clone,
                 "source_transcription_enabled": (
                     settings.livetranslate_enable_source_transcription
+                ),
+                "streaming_max_connections_per_token": (
+                    settings.streaming_max_connections_per_token
+                ),
+                "bridge_sessions_supported": settings.meeting_bridge_enabled,
+                "active_bridges": bridge_registry.active_bridges,
+                "active_directional_sessions": (
+                    bridge_registry.active_directional_sessions
+                ),
+                "meeting_local_to_remote_voice": (
+                    settings.meeting_local_to_remote_voice
+                ),
+                "meeting_remote_to_local_voice": (
+                    settings.meeting_remote_to_local_voice
                 ),
             },
         }
@@ -175,7 +196,13 @@ def create_app(
             await websocket.close(code=4429, reason="Streaming session limit reached")
             return
         await websocket.accept()
-        session = RoutedStreamingSession(websocket, settings, stream_router)
+        session = RoutedStreamingSession(
+            websocket,
+            settings,
+            stream_router,
+            token=token,
+            bridge_registry=bridge_registry,
+        )
         try:
             await asyncio.wait_for(
                 session.run(), timeout=settings.streaming_max_session_seconds
@@ -295,12 +322,15 @@ async def _save_upload(upload: UploadFile, path: Path, max_upload_mb: int) -> No
         raise GatewayHTTPError(400, "empty_upload", "上传文件为空。")
 
 
-async def _cleanup_loop(store: AudioStore) -> None:
+async def _cleanup_loop(store: AudioStore, bridge_registry: BridgeRegistry) -> None:
     while True:
         await asyncio.sleep(min(30, max(1, store.ttl_seconds)))
         deleted = store.cleanup_expired()
         if deleted:
             logger.info("Expired TTS audio deleted count=%d", deleted)
+        stale_bridges = await bridge_registry.cleanup_expired()
+        if stale_bridges:
+            logger.warning("Expired meeting bridge records deleted count=%d", stale_bridges)
 
 
 def _directory_writable(directory: Path) -> bool:
