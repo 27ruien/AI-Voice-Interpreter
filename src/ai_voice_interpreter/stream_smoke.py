@@ -109,11 +109,11 @@ class StreamingSmokeRunner:
             frames = 16000 * self.config.stream_audio_chunk_ms // 1000
             deadline = time.monotonic()
             while chunk := source.readframes(frames):
-                self.client.send_audio(chunk)
+                self._send_audio_or_raise(chunk, receiver)
                 deadline += self.config.stream_audio_chunk_ms / 1000
                 time.sleep(max(0.0, deadline - time.monotonic()))
             for _ in range(max(1, 1000 // self.config.stream_audio_chunk_ms)):
-                self.client.send_audio(b"\0\0" * frames)
+                self._send_audio_or_raise(b"\0\0" * frames, receiver)
                 deadline += self.config.stream_audio_chunk_ms / 1000
                 time.sleep(max(0.0, deadline - time.monotonic()))
             self.client.stop_session()
@@ -149,7 +149,7 @@ class StreamingSmokeRunner:
             while time.monotonic() < deadline and self._receiver_error is None:
                 chunk = microphone.read(0.25)
                 if chunk:
-                    self.client.send_audio(chunk)
+                    self._send_audio_or_raise(chunk, receiver)
                 if microphone.dropped_chunks:
                     raise GatewayError("麦克风发送队列溢出。")
         except KeyboardInterrupt:
@@ -178,6 +178,19 @@ class StreamingSmokeRunner:
                 self._handle_packet(packet)
         except Exception as exc:
             self._receiver_error = exc
+
+    def _send_audio_or_raise(self, pcm: bytes, receiver: threading.Thread) -> None:
+        if self._receiver_error is not None:
+            raise self._receiver_error
+        try:
+            self.client.send_audio(pcm)
+        except Exception as send_error:
+            # The receive worker may already have decoded the server's structured
+            # error while the send side observes only the subsequent close frame.
+            receiver.join(timeout=min(0.25, self.config.network_timeout_seconds))
+            if self._receiver_error is not None:
+                raise self._receiver_error from send_error
+            raise
 
     def _handle_packet(self, packet: StreamPacket) -> None:
         now = time.monotonic()
