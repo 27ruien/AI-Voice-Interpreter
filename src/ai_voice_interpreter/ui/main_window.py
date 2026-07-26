@@ -14,11 +14,13 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
     QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QTextEdit,
     QVBoxLayout,
@@ -31,11 +33,16 @@ from ..config import AppConfig
 from ..exceptions import InterpreterError
 from ..meeting.controller import MeetingBridgeController
 from ..meeting.devices import AudioDeviceCatalog, AudioRouteProfile
-from ..meeting.doctor import collect_checks as collect_meeting_checks
-from ..meeting.doctor import format_report as format_meeting_report
 from ..meeting.doctor import gateway_readyz
+from ..meeting.route_guard import RouteGuard
 from ..models import PipelineResult, ProcessingStatus
-from .workers import MeetingBridgeWorker, PlaybackWorker, ProcessingWorker, StreamingWorker
+from .workers import (
+    MeetingAudioCheckWorker,
+    MeetingBridgeWorker,
+    PlaybackWorker,
+    ProcessingWorker,
+    StreamingWorker,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -216,7 +223,13 @@ class MainWindow(QMainWindow):
         self.error_text.setMaximumHeight(100)
         self.error_text.setStyleSheet("color: #b91c1c;")
         layout.addWidget(self.error_text)
-        self.setCentralWidget(root)
+        scroll = QScrollArea()
+        scroll.setObjectName("main_scroll_area")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(root)
+        self.setCentralWidget(scroll)
+        self._refresh_meeting_devices()
         self._mode_changed()
 
     def _show_startup_notice(self) -> None:
@@ -314,6 +327,7 @@ class MainWindow(QMainWindow):
         if self.mode_combo.currentData() == "meeting_bridge":
             self.start_button.setEnabled(True)
             self.stop_button.setEnabled(False)
+            self._update_meeting_setup_actions()
 
     def _display_result(self, result: PipelineResult) -> None:
         self.source_text.setPlainText(result.recognized_text)
@@ -524,9 +538,9 @@ class MainWindow(QMainWindow):
             shutil.rmtree(self.latest_audio_path.parent, ignore_errors=True)
         event.accept()
 
-    def _build_meeting_frame(self) -> QFrame:
-        frame = QFrame()
-        frame.setFrameShape(QFrame.Shape.StyledPanel)
+    def _build_meeting_frame(self) -> QGroupBox:
+        frame = QGroupBox("Meeting Bridge Setup")
+        frame.setObjectName("meeting_bridge_setup")
         layout = QVBoxLayout(frame)
         warning = QLabel(
             "会议桥接模式必须使用耳机。外放可能导致中文译音重新进入物理麦克风；"
@@ -538,34 +552,56 @@ class MainWindow(QMainWindow):
         grid = QGridLayout()
         self.meeting_device_combos: dict[str, QComboBox] = {}
         roles = (
-            ("local_microphone", "我的麦克风"),
-            ("meeting_virtual_microphone_output", "发送给会议（BlackHole 2ch）"),
-            ("meeting_audio_capture_input", "接收会议（BlackHole 16ch）"),
-            ("local_headphones_output", "我的耳机"),
+            ("local_microphone", "Local Microphone"),
+            (
+                "meeting_virtual_microphone_output",
+                "Meeting Virtual Microphone (BlackHole 2ch)",
+            ),
+            (
+                "meeting_audio_capture_input",
+                "Meeting Audio Capture (BlackHole 16ch)",
+            ),
+            ("local_headphones_output", "Local Headphones"),
         )
         for row, (key, label) in enumerate(roles):
             grid.addWidget(QLabel(label), row, 0)
             combo = QComboBox()
             combo.setObjectName(f"meeting_{key}")
+            combo.currentIndexChanged.connect(self._update_meeting_setup_actions)
             grid.addWidget(combo, row, 1)
             self.meeting_device_combos[key] = combo
         layout.addLayout(grid)
         actions = QHBoxLayout()
-        refresh = QPushButton("刷新设备")
-        save = QPushButton("保存设置")
-        doctor = QPushButton("运行音频自检")
+        self.meeting_refresh_button = QPushButton("Refresh Devices")
+        self.meeting_refresh_button.setObjectName("meeting_refresh_devices")
+        self.meeting_audio_check_button = QPushButton("Run Audio Check")
+        self.meeting_audio_check_button.setObjectName("meeting_run_audio_check")
+        self.meeting_save_button = QPushButton("Save Route Profile")
+        self.meeting_save_button.setObjectName("meeting_save_route_profile")
         guide = QPushButton("打开会议设置说明")
         copy = QPushButton("复制设置摘要")
-        refresh.clicked.connect(self._refresh_meeting_devices)
-        save.clicked.connect(self._save_meeting_routes)
-        doctor.clicked.connect(self._run_meeting_doctor)
+        self.meeting_refresh_button.clicked.connect(self._refresh_meeting_devices)
+        self.meeting_audio_check_button.clicked.connect(
+            self._run_meeting_audio_check
+        )
+        self.meeting_save_button.clicked.connect(self._save_meeting_routes)
         guide.clicked.connect(self._show_meeting_guide)
         copy.clicked.connect(self._copy_meeting_summary)
-        for button in (refresh, save, doctor, guide, copy):
+        for button in (
+            self.meeting_refresh_button,
+            self.meeting_audio_check_button,
+            self.meeting_save_button,
+            guide,
+            copy,
+        ):
             actions.addWidget(button)
         layout.addLayout(actions)
         self.meeting_setup_confirmed = QCheckBox("已完成会议软件设置")
         layout.addWidget(self.meeting_setup_confirmed)
+        self.meeting_route_status = QLabel("No Audio Route Profile saved")
+        self.meeting_route_status.setObjectName("meeting_route_profile_status")
+        self.meeting_route_status.setWordWrap(True)
+        layout.addWidget(self.meeting_route_status)
         self.meeting_global_label = QLabel("Meeting Bridge：UNCONFIGURED")
         layout.addWidget(self.meeting_global_label)
         cards = QGridLayout()
@@ -602,7 +638,6 @@ class MainWindow(QMainWindow):
             self.meeting_direction_labels[direction] = labels
             cards.addWidget(card, 0, column)
         layout.addLayout(cards)
-        self._refresh_meeting_devices()
         frame.setVisible(False)
         return frame
 
@@ -630,8 +665,27 @@ class MainWindow(QMainWindow):
                 combo.setCurrentIndex(max(0, index))
             if profile:
                 self.meeting_setup_confirmed.setChecked(profile.meeting_setup_confirmed)
+                if profile.resolve(catalog) is not None:
+                    self.meeting_route_status.setText("Saved Audio Route Profile loaded")
+                else:
+                    self.meeting_route_status.setText(
+                        "Saved Audio Route Profile cannot be resolved; select devices again"
+                    )
+            else:
+                self.meeting_setup_confirmed.setChecked(False)
+                self.meeting_route_status.setText("No Audio Route Profile saved")
+            self._update_meeting_setup_actions()
         except Exception as exc:
             self.error_text.setPlainText(f"刷新会议音频设备失败：{exc}")
+            self._update_meeting_setup_actions()
+
+    def _update_meeting_setup_actions(self) -> None:
+        complete = bool(self.meeting_device_combos) and all(
+            combo.currentData() for combo in self.meeting_device_combos.values()
+        )
+        idle = self._thread is None
+        self.meeting_save_button.setEnabled(complete and idle)
+        self.meeting_audio_check_button.setEnabled(complete and idle)
 
     def _selected_meeting_profile(self) -> AudioRouteProfile:
         values = {
@@ -647,30 +701,76 @@ class MainWindow(QMainWindow):
 
     def _save_meeting_routes(self) -> None:
         try:
-            path = self._selected_meeting_profile().save()
-            self.error_text.setPlainText(f"会议音频设置已保存：{path.name}")
+            catalog = self._meeting_catalog or AudioDeviceCatalog.discover()
+            profile = self._selected_meeting_profile()
+            route = profile.resolve(catalog)
+            if route is None:
+                raise InterpreterError("选择的音频设备无法重新解析，请刷新后重试。")
+            ready = gateway_readyz(self.config)
+            guard = RouteGuard().validate(
+                route,
+                gateway_token_configured=bool(self.config.ai_gateway_token),
+                gateway_ready=ready,
+                meeting_setup_confirmed=profile.meeting_setup_confirmed,
+            )
+            if not guard.can_start:
+                reasons = "\n".join(
+                    f"{check.code}: {check.message}" for check in guard.failures
+                )
+                self.meeting_route_status.setText("Audio Route Profile not saved")
+                self.error_text.setPlainText(f"RouteGuard failed:\n{reasons}")
+                return
+            path = profile.save()
+            self.meeting_route_status.setText("Meeting audio route saved")
+            self.error_text.setPlainText(
+                f"Meeting audio route saved\n{path}"
+            )
         except Exception as exc:
-            self._fail(str(exc))
+            self.meeting_route_status.setText("Audio Route Profile not saved")
+            self.error_text.setPlainText(str(exc))
 
-    def _run_meeting_doctor(self) -> None:
+    def _run_meeting_audio_check(self) -> None:
         try:
             profile = self._selected_meeting_profile()
-        except Exception:
-            profile = None
-        checks, ready = collect_meeting_checks(
-            self.config,
-            self._meeting_catalog or AudioDeviceCatalog.discover(),
-            profile,
-        )
-        self.error_text.setPlainText(format_meeting_report(checks, ready))
+            catalog = self._meeting_catalog or AudioDeviceCatalog.discover()
+            if profile.resolve(catalog) is None:
+                raise InterpreterError("选择的音频设备无法重新解析，请刷新后重试。")
+            self.error_text.setPlainText("Running local meeting audio checks…")
+            self.meeting_save_button.setEnabled(False)
+            self.meeting_audio_check_button.setEnabled(False)
+            worker = MeetingAudioCheckWorker(catalog, profile)
+            worker.report_ready.connect(self._display_meeting_audio_check)
+            worker.failed.connect(self._fail)
+            self._start_worker(worker)
+        except Exception as exc:
+            self.error_text.setPlainText(str(exc))
+
+    def _display_meeting_audio_check(self, report: dict[str, Any]) -> None:
+        tests = report.get("tests", {})
+        lines = [
+            "PASS Local audio checks"
+            if report.get("can_start_meeting_bridge")
+            else "FAIL Local audio checks"
+        ]
+        if isinstance(tests, dict):
+            for name, result in tests.items():
+                if not isinstance(result, dict):
+                    continue
+                message = str(result.get("message", "completed"))
+                lines.append(f"{result.get('status', 'WARN')} {name}: {message}")
+        self.error_text.setPlainText("\n".join(lines))
 
     def _start_meeting_bridge(self) -> None:
         try:
             if self._thread is not None:
                 return
             catalog = self._meeting_catalog or AudioDeviceCatalog.discover()
-            profile = self._selected_meeting_profile()
-            profile.save()
+            selected_profile = self._selected_meeting_profile()
+            profile = AudioRouteProfile.load()
+            if profile is None:
+                raise InterpreterError("请先点击 Save Route Profile 保存并验证音频路由。")
+            if profile != selected_profile:
+                raise InterpreterError("设备选择已更改，请先重新保存 Route Profile。")
             route = profile.resolve(catalog)
             if route is None:
                 raise InterpreterError("保存的设备无法重新解析，请刷新并重新选择。")

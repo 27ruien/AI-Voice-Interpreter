@@ -8,7 +8,9 @@ from PySide6.QtCore import QObject, Signal, Slot
 
 from ..audio.player import MacAudioPlayer
 from ..config import AppConfig
+from ..meeting.audio_doctor import run_audio_checks
 from ..meeting.controller import BridgeState, MeetingBridgeController
+from ..meeting.devices import AudioDeviceCatalog, AudioRouteProfile
 from ..models import PipelineResult, ProcessingStatus
 from ..streaming.controller import StreamingSessionController
 
@@ -159,3 +161,29 @@ class MeetingBridgeWorker(QObject):
 
     def _emit_event(self, direction: str, event: dict[str, Any]) -> None:
         self.event_received.emit(direction, event)
+
+
+class MeetingAudioCheckWorker(QObject):
+    report_ready = Signal(object)
+    failed = Signal(str)
+    finished = Signal()
+
+    def __init__(
+        self,
+        catalog: AudioDeviceCatalog,
+        profile: AudioRouteProfile,
+    ) -> None:
+        super().__init__()
+        self.catalog = catalog
+        self.profile = profile
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self.report_ready.emit(
+                run_audio_checks(catalog=self.catalog, profile=self.profile)
+            )
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            self.finished.emit()

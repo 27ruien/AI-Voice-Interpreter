@@ -108,7 +108,7 @@ def collect_checks(
             checks.append(
                 DoctorCheck(
                     "PASS" if guard.can_start else "FAIL",
-                    "音频路由冲突",
+                    "Audio Route Profile",
                     "无关键冲突"
                     if guard.can_start
                     else "；".join(item.code for item in guard.failures),
